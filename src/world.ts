@@ -8,6 +8,9 @@ import { PUBLIC_BOUNDARY, PublicReplySkipped } from './safety.ts';
 import { Conversation } from './conversation.ts';
 import type { CommentTarget, SocialPlatform } from './platform.ts';
 import { KuaishouPlatform, kuaishouVideoId } from './platforms/kuaishou.ts';
+import { matchesPostedDynamic } from './platforms/bilibili-dynamic-publish.ts';
+import { DynamicPublishing, type DynamicPost } from './dynamic-publishing.ts';
+import { reviewDraft } from './conversation.ts';
 import { dynamicId } from './platforms/bilibili-dynamics.ts';
 import { DouyinPlatform } from './platforms/douyin.ts';
 import { fileURLToPath } from 'node:url';
@@ -310,6 +313,116 @@ export class SocialMediaWorld implements World {
     }
     return brief;
   }
+  private dynamicPublishAllowed(draft?: DynamicPost) {
+    const cfg = this.ctx.cfg,
+      b = cfg.platforms.bilibili;
+    if (!cfg.enabled || !b.enabled || !b.dynamics?.allowPublishing) return false;
+    if (draft?.mention) {
+      const binding = this.service.focus.binding(draft.accountId);
+      if (!cfg.focus.enabled || !cfg.focus.allowMentions || binding?.ownerId !== draft.mention.id)
+        return false;
+      const day = (at: string) =>
+        new Intl.DateTimeFormat('en-CA', { timeZone: this.ctx.timezone ?? 'UTC' }).format(
+          new Date(at),
+        );
+      const today = day(new Date().toISOString());
+      const used =
+        this.service.store
+          .outbox()
+          .filter(
+            (r) =>
+              r.accountId === draft.accountId &&
+              r.platform === 'bilibili' &&
+              r.mention &&
+              r.status !== 'rejected' &&
+              day(r.createdAt) === today,
+          ).length +
+        this.service.store
+          .dynamicPosts(draft.accountId)
+          .filter(
+            (r) =>
+              r.mention && r.attemptedAt && r.status !== 'rejected' && day(r.attemptedAt) === today,
+          ).length;
+      if (used > (cfg.focus.maxDailyMentions ?? 3)) return false;
+    }
+    return true;
+  }
+  private dynamicPublisher(signal: AbortSignal) {
+    return new DynamicPublishing(
+      this.service.store,
+      () => ({
+        enabled: !!(this.ctx.cfg.enabled && this.ctx.cfg.platforms.bilibili.enabled),
+        allowPublishing: !!this.ctx.cfg.platforms.bilibili.dynamics?.allowPublishing,
+        maxDailyPosts: this.ctx.cfg.platforms.bilibili.dynamics?.maxDailyPosts ?? 3,
+        minIntervalSec: this.ctx.cfg.platforms.bilibili.dynamics?.minIntervalSec ?? 300,
+      }),
+      async (draft) => {
+        if (!this.dynamicPublishAllowed(draft))
+          return { status: 'rejected', detail: '动态发布或@权限、绑定、配额已变化，尚未提交。' };
+        return this.browserSender.publishDynamic(draft, signal, () =>
+          this.dynamicPublishAllowed(draft),
+        );
+      },
+      this.ctx.timezone,
+    );
+  }
+  private async dynamicOperation(args: Record<string, unknown>, signal: AbortSignal) {
+    if (!['prepare', 'publish', 'posts'].includes(String(args.action)))
+      return this.readDynamics(args, signal);
+    if (args.action === 'publish' && (args.text !== undefined || args.mentionFocus !== undefined))
+      throw Error('publish只接收draftId，改正文或@请先重新prepare。');
+    this.service.platform('bilibili');
+    const account =
+      this.service.status().platforms.find((p) => p.id === 'bilibili')?.account ??
+      (await this.service.connect('bilibili', signal));
+    const publisher = this.dynamicPublisher(signal);
+    if (args.action === 'posts')
+      return {
+        items: publisher.records(account.id),
+        boundary: '已准备、已受理、待核实分别记录；sent不代表访客可见或@通知已送达。',
+      };
+    if (args.action === 'publish') {
+      if (args.text !== undefined || args.mentionFocus !== undefined)
+        throw Error('publish只接收draftId，改正文或@请先重新prepare。');
+      const draft = this.service.store
+        .dynamicPosts(account.id)
+        .find((r) => r.id === text(args.draftId, 80));
+      if (draft?.status === 'prepared' && !this.dynamicPublishAllowed(draft))
+        throw Error('动态发布或@权限、绑定已关闭或变化，尚未提交。');
+      return publisher.publish(account.id, text(args.draftId, 80));
+    }
+    if (args.mentionFocus !== undefined && typeof args.mentionFocus !== 'boolean')
+      throw Error('mentionFocus须为布尔值。');
+    let mention;
+    if (args.mentionFocus) {
+      const binding = this.service.focus.binding(account.id);
+      if (!this.ctx.cfg.focus.enabled || !this.ctx.cfg.focus.allowMentions || !binding)
+        throw Error('请先在本地绑定并允许@特别关注。');
+      const data = await this.bilibili.request(
+        '/x/web-interface/card',
+        { mid: binding.ownerId },
+        signal,
+      );
+      const name = String(data.card?.name ?? '').trim();
+      if (
+        String(data.card?.mid) !== binding.ownerId ||
+        !name ||
+        name.length > 80 ||
+        /[\r\n@]/.test(name)
+      )
+        throw Error('未核实到特别关注的准确UID和名称，尚未准备@。');
+      mention = { id: binding.ownerId, name };
+    }
+    const draft = publisher.prepare(account.id, args.text, mention);
+    return {
+      ...draft,
+      advice: [
+        ...reviewDraft(draft.text),
+        '这是公开纯文字动态，不带私人记忆；确认这就是想发的正文，再以draftId发布。@使用官网真实账号标记，不是手写昵称。',
+      ],
+      maxDailyPosts: this.ctx.cfg.platforms.bilibili.dynamics?.maxDailyPosts ?? 3,
+    };
+  }
   private dynamicStatus(accountId?: string) {
     const id =
       accountId ??
@@ -320,6 +433,8 @@ export class SocialMediaWorld implements World {
     );
     return {
       enabled: !!this.ctx.cfg.platforms.bilibili.dynamics?.enabled,
+      allowPublishing: !!this.ctx.cfg.platforms.bilibili.dynamics?.allowPublishing,
+      posts: this.service.store.dynamicPosts(id).slice(-20).reverse(),
       readsToday: this.service.store.dynamicReadCount(id, day),
       limit: this.ctx.cfg.platforms.bilibili.dynamics?.maxDailyReads ?? 20,
       items: this.service.store
@@ -331,7 +446,7 @@ export class SocialMediaWorld implements World {
   private async readDynamics(args: Record<string, unknown>, signal: AbortSignal) {
     this.service.platform('bilibili');
     if (!['list', 'read', 'cached'].includes(String(args.action)))
-      throw Error('动态仅支持list/read/cached，尚不支持主动发布。');
+      throw Error('动态action无效，请使用list/read/cached/prepare/publish/posts。');
     if (args.scope !== undefined && !['focus', 'feed', 'creator'].includes(String(args.scope)))
       throw Error('动态读取范围无效。');
     if (args.action !== 'cached' && !this.ctx.cfg.platforms.bilibili.dynamics?.enabled)
@@ -367,6 +482,17 @@ export class SocialMediaWorld implements World {
       account.id,
     );
     this.service.store.rememberDynamics(account.id, result.items);
+    for (const post of this.service.store.dynamicPosts(account.id)) {
+      if (
+        post.dynamicId &&
+        result.items.some((item) => item.id === post.dynamicId && matchesPostedDynamic(item, post))
+      )
+        this.service.store.saveDynamicPost({
+          ...post,
+          status: 'sent',
+          detail: '已从官网回读准确编号、正文和可核实的@账号；访客可见性与通知送达另行核实。',
+        });
+    }
     return {
       ...result,
       readsToday: this.service.store.dynamicReadCount(account.id, day),
@@ -386,6 +512,7 @@ export class SocialMediaWorld implements World {
               ...this.instance.status(),
               bilibiliExtras: {
                 dynamics: !!this.ctx.cfg.platforms.bilibili.dynamics?.enabled,
+                dynamicPublishing: !!this.ctx.cfg.platforms.bilibili.dynamics?.allowPublishing,
                 allowFocusMentions: !!this.ctx.cfg.focus.allowMentions,
                 mentionTransport: this.ctx.cfg.platforms.bilibili.posting.transport,
                 maxDailyMentions: this.ctx.cfg.focus.maxDailyMentions ?? 3,
@@ -571,7 +698,7 @@ export class SocialMediaWorld implements World {
       };
     }
     if (name === 'socialmedia_dynamic')
-      return { text: JSON.stringify(await this.readDynamics(args, signal)) };
+      return { text: JSON.stringify(await this.dynamicOperation(args, signal)) };
     if (name === 'socialmedia_status')
       return {
         text: JSON.stringify({
@@ -1204,6 +1331,13 @@ export class SocialMediaWorld implements World {
           await this.service.connect('bilibili', this.controller.signal);
           this.lastError = undefined;
           return result;
+        }
+        if (method === 'dynamicPost') {
+          if (panel !== 'settings') throw Error('仅可在本地配置页准备和发布动态。');
+          return this.dynamicOperation(
+            (args[0] ?? {}) as Record<string, unknown>,
+            this.controller.signal,
+          );
         }
         if (method === 'readDynamics')
           return this.readDynamics(

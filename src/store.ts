@@ -1,3 +1,4 @@
+import type { DynamicPost } from './dynamic-publishing.ts';
 import { SendArchive } from './archive.ts';
 import type { PublicDynamic } from './platforms/bilibili-dynamics.ts';
 import { RESOURCE_DEFAULTS, type ResourceConfig } from './resources.ts';
@@ -23,6 +24,7 @@ import type {
 
 import type { FocusBinding, FocusWork, FocusCheck, Contact } from './focus.ts';
 interface State {
+  dynamicPosts?: DynamicPost[];
   dynamics?: PublicDynamic[];
   dynamicReads?: Record<string, number>;
   focusBindings: FocusBinding[];
@@ -86,6 +88,7 @@ export class SocialStore {
         )
           throw new Error();
         if (s.roaming !== undefined && !Array.isArray(s.roaming)) throw new Error();
+        if (s.dynamicPosts !== undefined && !Array.isArray(s.dynamicPosts)) throw new Error();
         if (s.dynamics !== undefined && !Array.isArray(s.dynamics)) throw new Error();
         if (
           s.dynamicReads !== undefined &&
@@ -123,8 +126,33 @@ export class SocialStore {
           r.detail = '发送期间进程中断，请核对评论区；未自动重发。';
           changed = true;
         }
+      for (const r of this.state.dynamicPosts ?? [])
+        if (r.status === 'sending') {
+          r.status = 'unknown';
+          r.detail = '发布期间进程中断，结果待核实，不自动重发。';
+          changed = true;
+        }
       if (changed) this.save();
     }
+  }
+  dynamicPosts(accountId: string) {
+    return structuredClone(
+      (this.state.dynamicPosts ?? []).filter((r) => r.accountId === accountId),
+    );
+  }
+  saveDynamicPost(record: DynamicPost) {
+    const rows = this.state.dynamicPosts ?? [];
+    const index = rows.findIndex((r) => r.id === record.id);
+    if (index >= 0) rows[index] = structuredClone(record);
+    else {
+      // Expired never-submitted drafts have no recovery or duplicate-send value.
+      const keep = rows.filter(
+        (r) => r.status !== 'prepared' || Date.now() - Date.parse(r.createdAt) < 3600000,
+      );
+      if (keep.length >= 2000) throw Error('动态记录达到2000条保护上限，暂停新发布；原记录保留。');
+      this.state.dynamicPosts = [...keep, structuredClone(record)];
+    }
+    this.save();
   }
   dynamics(accountId: string) {
     return structuredClone((this.state.dynamics ?? []).filter((x) => x.accountId === accountId));

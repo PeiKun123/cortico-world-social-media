@@ -649,7 +649,17 @@ export class SocialService {
               r.mention &&
               r.status !== 'rejected' &&
               this.day(r.createdAt) === today,
-          ).length >= (this.cfg.focus.maxDailyMentions ?? 3)
+          ).length +
+          this.store
+            .dynamicPosts(account.id)
+            .filter(
+              (r) =>
+                r.mention &&
+                r.attemptedAt &&
+                r.status !== 'rejected' &&
+                this.day(r.attemptedAt) === today,
+            ).length >=
+        (this.cfg.focus.maxDailyMentions ?? 3)
       )
         throw new PublicReplySkipped('今天主动@特别关注已达上限。');
     };

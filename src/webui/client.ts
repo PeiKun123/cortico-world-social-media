@@ -1,4 +1,5 @@
 import type { GroupChats } from '../group-chat.ts';
+import type { DynamicPost } from '../dynamic-publishing.ts';
 import type { PublicDynamic } from '../platforms/bilibili-dynamics.ts';
 import { focusView, focusStatus, type FocusSnapshot } from './focus.ts';
 import {
@@ -19,7 +20,14 @@ import type { WebUiPanelContext } from 'cortico/web/shared/client-panel.ts';
 import type { InboxItem, SendRecord, PublicVideo, PublicComment } from '../platform.ts';
 import './style.css';
 interface Snapshot {
-  dynamics?: { enabled: boolean; readsToday: number; limit: number; items: PublicDynamic[] };
+  dynamics?: {
+    enabled: boolean;
+    allowPublishing?: boolean;
+    posts?: DynamicPost[];
+    readsToday: number;
+    limit: number;
+    items: PublicDynamic[];
+  };
   groupChat?: ReturnType<GroupChats['status']> & { error?: string };
   resources?: {
     todayCalls: number;
@@ -645,7 +653,11 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
     }
   }
   const biliSocial = fold('动态与主动 @', 'sm-subsection sm-bili-social');
-  const dynamicFeedback = el('p', '动态读取默认关闭；仅记录已核实文字和图片数量。', 'sm-muted');
+  const dynamicFeedback = el(
+    'p',
+    '读取与发布分别开启；纯文字动态需先准备草稿，发布与@结果分别核实，用完退出浏览器。',
+    'sm-muted',
+  );
   biliSocial.append(dynamicFeedback);
   const readDynamicsButton = button(
     '读取特别关注的最新动态',
@@ -1219,6 +1231,10 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
   const dynamicRecords = fold('B站动态 · 最近读过', 'sm-focus-card');
   dynamicRecords.dataset.platform = 'bilibili';
   const dynamicBody = el('div', undefined, 'sm-focus-body');
+  const dynamicPosts = fold('B站动态 · 发布记录', 'sm-focus-card');
+  dynamicPosts.dataset.platform = 'bilibili';
+  const dynamicPostBody = el('div', undefined, 'sm-focus-body');
+  dynamicPosts.append(dynamicPostBody);
   dynamicRecords.append(dynamicBody);
   if (settingsMode) root.append(header, capabilities, alert, feedback, settings);
   else
@@ -1233,6 +1249,7 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
       kuaishouFocusPanel.element,
       groupRecords,
       dynamicRecords,
+      dynamicPosts,
       feed,
     );
   let archivedRecords: Snapshot['outbox'] = [],
@@ -1594,6 +1611,25 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
         item.append(el('small', d.imageCount + '张图片 · 本次只读取文字，未观察图片'));
       link('打开原动态', d.url, item);
       dynamicBody.append(item);
+    }
+    dynamicPosts.hidden = !state.dynamics?.posts?.length;
+    dynamicPostBody.replaceChildren();
+    for (const r of state.dynamics?.posts ?? []) {
+      const item = el('article', undefined, 'sm-entry');
+      const label = {
+        prepared: '草稿待发布',
+        sending: '正在提交',
+        sent: '已受理',
+        unknown: '结果待核实 · 不补发',
+        rejected: '未提交 / 未获准',
+      }[r.status];
+      item.append(
+        el('small', prettyTime(r.attemptedAt ?? r.createdAt) + ' · ' + label),
+        el('p', (r.mention ? '@' + r.mention.name + ' ' : '') + r.text),
+      );
+      if (r.detail) item.append(el('small', r.detail));
+      link('打开这条动态', r.url, item);
+      dynamicPostBody.append(item);
     }
     renderGroups(state);
     const p = state.platforms.find((p) => p.id === 'bilibili');

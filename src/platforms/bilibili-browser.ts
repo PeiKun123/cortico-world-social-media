@@ -1,3 +1,5 @@
+import type { DynamicPost, DynamicPostResult } from '../dynamic-publishing.ts';
+import { submitDynamicPage, matchesPostedDynamic } from './bilibili-dynamic-publish.ts';
 import { browserCacheArgs, clearNetworkCache } from '../resources.ts';
 import { readDynamicPage } from './bilibili-dynamics.ts';
 import { existsSync } from 'node:fs';
@@ -431,6 +433,116 @@ export class BilibiliBrowserSender {
     const current = await context.cookies(ORIGIN);
     this.saveCookie(mergeBrowserDeviceCookies(source, current));
     return { context, page, account: { id: expectedId, name: String(account.uname || '') } };
+  }
+  async publishDynamic(
+    draft: DynamicPost,
+    signal?: AbortSignal,
+    permission: () => boolean = this.canPublish,
+  ): Promise<DynamicPostResult> {
+    if (this.loginOpen || this.busy)
+      return { status: 'rejected', detail: 'B站正在登录或处理其他操作，本次未提交。' };
+    if (!permission()) return { status: 'rejected', detail: '动态发布已关闭，尚未提交。' };
+    this.busy = true;
+    const combined = AbortSignal.any([
+      this.controller.signal,
+      ...(signal ? [signal] : []),
+      AbortSignal.timeout(90000),
+    ]);
+    const abort = () => {
+      void this.context?.close().catch(() => {});
+    };
+    combined.addEventListener('abort', abort, { once: true });
+    let stage = '浏览器与登录核验';
+    let submitted = false;
+    let isolated: BrowserContext | undefined;
+    try {
+      const opened = await this.open(combined, draft.accountId);
+      const account = opened.account;
+      // A fresh in-memory context keeps the user's native pending draft untouched.
+      stage = '建立独立发布环境';
+      isolated = await opened.context
+        .browser()!
+        .newContext({ viewport: { width: 1280, height: 900 } });
+      await isolated.addCookies(
+        await opened.context.cookies([
+          ORIGIN,
+          'https://t.bilibili.com',
+          'https://api.bilibili.com',
+        ]),
+      );
+      const context = isolated,
+        page = await context.newPage();
+      const session = this.cookie();
+      await context.route('**/*', (r) =>
+        r.request().method() === 'GET' ? r.fallback() : r.abort(),
+      );
+      stage = '读取本人动态基线';
+      const before = await readDynamicPage(page, { ownerId: account.id, limit: 5 }, combined);
+      const oldIds = new Set(before.items.map((x) => x.id));
+      stage = '加载动态发布页';
+      await readDynamicPage(page, { limit: 5 }, combined);
+      const current = async () =>
+        this.cookie() === session &&
+        permission() &&
+        (await context.cookies(ORIGIN)).find((c) => c.name === 'DedeUserID')?.value === account.id;
+      stage = '官网正文与提交检查';
+      const result = await submitDynamicPage(page, draft, combined, current);
+      submitted = result.forwarded;
+      if (result.rejected && !submitted) return { status: 'rejected', detail: result.rejected };
+      if (!submitted)
+        return {
+          status: 'rejected',
+          detail: result.rejected ?? '官网内容检查或提交未完成，未发出动态。',
+        };
+      // Once forwarded, deny every further write before attempting a read-back. Never click again.
+      await page.route('**/*', (r) => (r.request().method() === 'GET' ? r.fallback() : r.abort()));
+      let found;
+      try {
+        const read = await readDynamicPage(page, { ownerId: account.id, limit: 5 }, combined);
+        found = read.items.find(
+          (x) =>
+            !oldIds.has(x.id) &&
+            matchesPostedDynamic(x, draft) &&
+            x.publishedAt >=
+              Math.floor(Date.parse(draft.attemptedAt ?? draft.createdAt) / 1000) - 5,
+        );
+      } catch {}
+      if (!(await current()))
+        return { status: 'unknown', detail: '提交后账号或权限发生变化，结果待核实，不补发。' };
+      if (found)
+        return {
+          status: 'sent',
+          dynamicId: found.id,
+          url: found.url,
+          detail: '官网提交后已从本人动态列表读到准确编号和正文；访客可见性及@通知送达另行核验。',
+        };
+      if (result.id)
+        return {
+          status: 'sent',
+          dynamicId: result.id,
+          url: 'https://t.bilibili.com/' + result.id,
+          detail: '官网返回动态编号；列表回读、公开可见性与@通知尚未核实，不补发。',
+        };
+      return {
+        status: 'unknown',
+        detail: result.rejected ?? '官网已触发提交，尚未核实编号；保留记录，禁止自动重发。',
+      };
+    } catch (e) {
+      return {
+        status: submitted ? 'unknown' : 'rejected',
+        detail: submitted
+          ? '提交后核验未完成，结果待核实，不补发。'
+          : e instanceof PlatformError
+            ? e.message
+            : stage + '未完成（' + (e instanceof Error ? e.name : 'Error') + '），尚未提交。',
+      };
+    } finally {
+      combined.removeEventListener('abort', abort);
+      await isolated?.close().catch(() => {});
+      await this.context?.close().catch(() => {});
+      this.context = undefined;
+      this.busy = false;
+    }
   }
   async readDynamics(
     options: { ownerId?: string; id?: string; limit?: number },

@@ -128,13 +128,11 @@ it.skipIf(!findBrowserExecutable())(
       { name: 'DedeUserID', value: '42', domain: '.bilibili.com', path: '/' },
     ]);
     const launch = vi.spyOn(chromium, 'launchPersistentContext').mockResolvedValue(context);
-    const get = vi
-      .spyOn(context.request, 'get')
-      .mockResolvedValue({
-        ok: () => true,
-        text: async () =>
-          JSON.stringify({ code: 0, data: { isLogin: true, mid: 42, uname: '测试' } }),
-      } as any);
+    const get = vi.spyOn(context.request, 'get').mockResolvedValue({
+      ok: () => true,
+      text: async () =>
+        JSON.stringify({ code: 0, data: { isLogin: true, mid: 42, uname: '测试' } }),
+    } as any);
     let saved = '';
     const sender = new BilibiliBrowserSender(
       'unused',
@@ -164,3 +162,14 @@ it.skipIf(!findBrowserExecutable())(
     }
   },
 );
+
+it('retains the exact official mention UID rather than inferring it from display text', () => {
+  const value: any = row();
+  value.modules.module_dynamic.major.opus.summary.rich_text_nodes = [
+    { type: 'RICH_TEXT_NODE_TYPE_AT', rid: '700000000000000001', orig_text: '@示例关注' },
+    { type: 'RICH_TEXT_NODE_TYPE_AT', rid: 'invalid', orig_text: '@冒充' },
+  ];
+  expect(mapDynamicPage({ code: 0, data: { items: [value] } }).items[0].mentions).toEqual([
+    { id: '700000000000000001', text: '@示例关注' },
+  ]);
+});

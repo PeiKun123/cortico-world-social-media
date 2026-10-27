@@ -3,7 +3,13 @@ import { RESOURCE_DEFAULTS, type ResourceConfig } from './resource-policy.ts';
 import type { ConfigGroup } from 'cortico/core/types.ts';
 export interface SocialPlatformConfig {
   chat?: GroupConfig;
-  dynamics?: { enabled: boolean; maxDailyReads?: number };
+  dynamics?: {
+    enabled: boolean;
+    maxDailyReads?: number;
+    allowPublishing?: boolean;
+    maxDailyPosts?: number;
+    minIntervalSec?: number;
+  };
   focus?: FocusConfig;
   roaming?: Partial<RoamingConfig>;
   enabled: boolean;
@@ -175,7 +181,13 @@ export const SOCIALMEDIA_DEFAULTS: SocialMediaConfigSection = {
       },
     },
     bilibili: {
-      dynamics: { enabled: false, maxDailyReads: 20 },
+      dynamics: {
+        enabled: false,
+        maxDailyReads: 20,
+        allowPublishing: false,
+        maxDailyPosts: 3,
+        minIntervalSec: 300,
+      },
       enabled: true,
       monitor: { enabled: false, intervalSec: 60 },
       posting: {
@@ -521,7 +533,7 @@ export const SOCIALMEDIA_CONFIG_GROUP: ConfigGroup = {
         type: 'boolean',
         title: '允许读取B站动态（实验）',
         description:
-          '通过独立官网登录态读取关注流、指定账号或动态正文；每次最多五条，只含可核实的文字和图片数量，不代表已观看图片。不会主动发布动态。',
+          '通过独立官网登录态读取关注流、指定账号或动态正文；每次最多五条，只含可核实的文字和图片数量，不代表已观看图片。动态发布使用下方独立开关。',
         'x-hot': true,
       },
       'worlds.socialmedia.platforms.bilibili.dynamics.maxDailyReads': {
@@ -532,11 +544,33 @@ export const SOCIALMEDIA_CONFIG_GROUP: ConfigGroup = {
         description: '默认20次，每次最多五条；失败尝试也计数，已读缓存不重复占次数，重启不清零。',
         'x-hot': true,
       },
+      'worlds.socialmedia.platforms.bilibili.dynamics.allowPublishing': {
+        type: 'boolean',
+        title: '允许发布纯文字动态（实验）',
+        description:
+          '默认关闭；Bot先准备草稿，再从官网发布。每条最多500字，可选择@本地特别关注；不支持图片、转发、私信。用完立即关闭浏览器，结果不明不补发。',
+        'x-hot': true,
+      },
+      'worlds.socialmedia.platforms.bilibili.dynamics.maxDailyPosts': {
+        type: 'integer',
+        title: '每天最多发布动态数',
+        minimum: 1,
+        maximum: 20,
+        description: '默认3条；提交尝试计入预算，重启不清零。与视频评论配额分开。',
+        'x-hot': true,
+      },
+      'worlds.socialmedia.platforms.bilibili.dynamics.minIntervalSec': {
+        type: 'integer',
+        title: '动态发布最短间隔（秒）',
+        minimum: 60,
+        maximum: 86400,
+        'x-hot': true,
+      },
       'worlds.socialmedia.focus.allowMentions': {
         type: 'boolean',
         title: '允许主动 @ B站特别关注（接口实验）',
         description:
-          '默认关闭；仅在Bot明确选择时@本地已绑定的主人，须显式选择接口发评。普通网页发评不自动改走接口，也不会每条都@。',
+          '默认关闭；仅在Bot明确选择时@本地已绑定的主人，视频评论须显式选择接口；纯文字动态使用官网原生@选择器。普通网页评论不自动改走接口，也不会每条都@。',
         'x-hot': true,
       },
       'worlds.socialmedia.focus.maxDailyMentions': {

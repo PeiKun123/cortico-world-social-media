@@ -2,6 +2,7 @@ import type { Page } from 'playwright-core';
 import { PlatformError, type CommentTarget } from '../platform.ts';
 import { numericId, parsePlatformJson } from './bilibili.ts';
 export interface PublicDynamic {
+  mentions?: Array<{ id: string; text: string }>;
   id: string;
   accountId?: string;
   authorId: string;
@@ -45,6 +46,16 @@ function mapItem(x: any): PublicDynamic {
   const authorId = numericId(a?.mid),
     type = clean(x.type, 60);
   const content = d.desc?.text ?? major.opus?.summary?.text ?? major.archive?.desc ?? '';
+  const rich = d.desc?.rich_text_nodes ?? major.opus?.summary?.rich_text_nodes ?? [];
+  const mentions: Array<{ id: string; text: string }> = [];
+  for (const node of (Array.isArray(rich) ? rich : []).slice(0, 100)) {
+    if (node?.type !== 'RICH_TEXT_NODE_TYPE_AT' || mentions.length >= 8) continue;
+    try {
+      const id = numericId(node.rid),
+        text = clean(node.orig_text ?? node.text, 90);
+      if (text.startsWith('@') && !mentions.some((m) => m.id === id)) mentions.push({ id, text });
+    } catch {}
+  }
   const basic = x.basic ?? {};
   let target: CommentTarget | undefined;
   if ([1, 11, 17].includes(Number(basic.comment_type))) {
@@ -84,6 +95,7 @@ function mapItem(x: any): PublicDynamic {
       99,
       Math.max(0, (major.opus?.pics ?? major.draw?.items ?? []).length ?? 0),
     ),
+    ...(mentions.length ? { mentions } : {}),
     ...(target ? { target } : {}),
     ...(original ? { original } : {}),
   };

@@ -9,7 +9,8 @@ export const SOCIALMEDIA: WorldDefinition<SocialMediaConfigSection> = {
   create: (ctx) => new SocialMediaWorld(ctx),
   describe: {
     tools: describeTools(SOCIALMEDIA_TOOL_DECLS, {
-      socialmedia_dynamic: '读取B站关注流、特别关注或指定动态；有界文字记录，不发动态或私信。',
+      socialmedia_dynamic:
+        '读取B站动态，或准备并发布纯文字动态；支持原生@特别关注，结果不明不补发。不支持私信。',
       socialmedia_groupchat: '读取本地指定抖音群并在该群接话，与QQ、Dungeon、评论区独立。',
       socialmedia_focus: '查看本地特别关注绑定、近期作品及参与记录，不能修改主人账号。',
       socialmedia_prepare: '发言前整理原话、依据与友善表达建议，不发送内容。',

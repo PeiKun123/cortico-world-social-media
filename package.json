@@ -2,7 +2,7 @@
   "name": "cortico-world-social-media",
   "version": "0.6.3",
   "type": "module",
-  "description": "社交视窗：B站视频、动态读取与评论，实验接入抖音、快手；按作品归档互动，分平台设置特别关注与闲逛，B站可选主动@关注、抖音可监听指定群。快手暂不支持图文发评与群聊。沿用现有模型。",
+  "description": "社交视窗：B站视频、动态读写与评论，实验接入抖音、快手；按作品归档互动，分平台设置特别关注与闲逛，B站可选主动@关注、抖音可监听指定群。快手暂不支持图文发评与群聊。沿用现有模型。",
   "license": "MIT",
   "engines": {
     "node": ">=22.16"
@@ -38,11 +38,11 @@
     "locales": {
       "zh": {
         "displayName": "社交视窗",
-        "description": "社交视窗：B站视频、动态读取与评论，实验接入抖音、快手；按作品归档互动，分平台设置特别关注与闲逛，B站可选主动@关注、抖音可监听指定群。快手暂不支持图文发评与群聊。沿用现有模型。"
+        "description": "社交视窗：B站视频、动态读写与评论，实验接入抖音、快手；按作品归档互动，分平台设置特别关注与闲逛，B站可选主动@关注、抖音可监听指定群。快手暂不支持图文发评与群聊。沿用现有模型。"
       },
       "en": {
         "displayName": "Social Window",
-        "description": "Social Window: Bilibili videos, read-only dynamics and comments, with experimental Douyin and Kuaishou adapters. Per-work records, owner focus and roaming; opt-in Bilibili focus mentions and allowlisted Douyin groups. No Kuaishou image-post comments or group chats. Uses your existing model."
+        "description": "Social Window: Bilibili videos, text dynamics and comments, with experimental Douyin and Kuaishou adapters. Per-work records, owner focus and roaming; opt-in Bilibili focus mentions and allowlisted Douyin groups. No Kuaishou image-post comments or group chats. Uses your existing model."
       }
     },
     "screenshots": [

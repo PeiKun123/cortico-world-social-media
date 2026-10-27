@@ -796,7 +796,7 @@ it('keeps dynamic reading disabled without network and rejects unimplemented pub
   });
   expect(await t.handler({ action: 'publish', text: '不会发送' }, {} as never)).toMatchObject({
     failed: true,
-    text: expect.stringContaining('尚不支持主动发布'),
+    text: expect.stringContaining('draftId'),
   });
   expect(x.requests()).toBe(0);
 });
@@ -845,4 +845,38 @@ it('reads bounded official dynamics once, saves current-account cache and preser
       new Intl.DateTimeFormat('en-CA', { timeZone: 'UTC' }).format(new Date()),
     ),
   ).toBe(1);
+});
+
+it('prepares account-bound dynamic drafts, uses separate publishing opt-in and reuses a saved receipt', async () => {
+  const x = setup();
+  x.cfg.enabled = true;
+  x.ctx.storeSecret('cookie', 'SESSDATA=test;bili_jct=test;DedeUserID=42');
+  const tool = x.world.tools().find((t) => t.name === 'socialmedia_dynamic')!;
+  const prepare = (await tool.handler(
+    { action: 'prepare', text: '今天也要开心呀。' },
+    {} as never,
+  )) as any;
+  const draft = JSON.parse(prepare.text);
+  expect(draft.status).toBe('prepared');
+  expect(await tool.handler({ action: 'publish', draftId: draft.id }, {} as never)).toMatchObject({
+    failed: true,
+    text: expect.stringContaining('关闭'),
+  });
+  x.cfg.platforms.bilibili.dynamics!.allowPublishing = true;
+  const send = vi
+    .spyOn(x.world.browserSender, 'publishDynamic')
+    .mockResolvedValue({
+      status: 'sent',
+      dynamicId: '1261990610011684873',
+      url: 'https://t.bilibili.com/1261990610011684873',
+    });
+  const result = (await tool.handler({ action: 'publish', draftId: draft.id }, {} as never)) as any;
+  expect(JSON.parse(result.text)).toMatchObject({ status: 'sent' });
+  await tool.handler({ action: 'publish', draftId: draft.id }, {} as never);
+  expect(send).toHaveBeenCalledTimes(1);
+  const posts = (await tool.handler({ action: 'posts' }, {} as never)) as any;
+  expect(JSON.parse(posts.text).items[0].dynamicId).toBe('1261990610011684873');
+  expect(
+    await tool.handler({ action: 'prepare', text: '想分享', mentionFocus: true }, {} as never),
+  ).toMatchObject({ failed: true, text: expect.stringContaining('允许@') });
 });
