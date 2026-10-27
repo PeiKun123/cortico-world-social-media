@@ -1,0 +1,101 @@
+{
+  "name": "cortico-world-social-media",
+  "version": "0.6.3",
+  "type": "module",
+  "description": "社交视窗：B站视频、动态读取与评论，实验接入抖音、快手；按作品归档互动，分平台设置特别关注与闲逛，B站可选主动@关注、抖音可监听指定群。快手暂不支持图文发评与群聊。沿用现有模型。",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.16"
+  },
+  "main": "./src/index.ts",
+  "keywords": [
+    "cortico-world",
+    "cortico",
+    "bilibili",
+    "social-media",
+    "video",
+    "comments",
+    "companion",
+    "douyin",
+    "kuaishou"
+  ],
+  "cortico": {
+    "kind": "world",
+    "api": 6,
+    "displayName": "社交视窗",
+    "describe": "describe.json",
+    "webUiClient": "dist/webui.js",
+    "webUiStyle": "dist/webui.css",
+    "tags": [
+      "video",
+      "browser",
+      "internet",
+      "external-setup",
+      "experimental",
+      "unofficial-api"
+    ],
+    "icon": "assets/icon.png",
+    "locales": {
+      "zh": {
+        "displayName": "社交视窗",
+        "description": "社交视窗：B站视频、动态读取与评论，实验接入抖音、快手；按作品归档互动，分平台设置特别关注与闲逛，B站可选主动@关注、抖音可监听指定群。快手暂不支持图文发评与群聊。沿用现有模型。"
+      },
+      "en": {
+        "displayName": "Social Window",
+        "description": "Social Window: Bilibili videos, read-only dynamics and comments, with experimental Douyin and Kuaishou adapters. Per-work records, owner focus and roaming; opt-in Bilibili focus mentions and allowlisted Douyin groups. No Kuaishou image-post comments or group chats. Uses your existing model."
+      }
+    },
+    "screenshots": [
+      "assets/timeline.png",
+      "assets/settings.png",
+      "assets/limits.png"
+    ]
+  },
+  "files": [
+    "src",
+    "dist",
+    "describe.json",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "assets"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "prepack": "node scripts/prepack.mjs"
+  },
+  "dependencies": {
+    "playwright-core": "1.62.1",
+    "qrcode": "^1.5.4"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.25",
+    "@types/node": "^22.10.0",
+    "@types/qrcode": "^1.5.5",
+    "@types/ws": "^8.18.2",
+    "cortico": "^0.2.5",
+    "esbuild": "^0.28.2",
+    "express": "^4.22.3",
+    "jsdom": "^30.0.1",
+    "prettier": "^3.9.10",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8",
+    "ws": "^8.22.0"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
+  },
+  "author": "peikun123",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/PeiKun123/cortico-world-social-media.git"
+  },
+  "bugs": {
+    "url": "https://github.com/PeiKun123/cortico-world-social-media/issues"
+  },
+  "homepage": "https://github.com/PeiKun123/cortico-world-social-media#readme"
+}

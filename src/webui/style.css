@@ -1,0 +1,938 @@
+.socialmedia-desk {
+  --sm-accent: #9ac8d7;
+  --sm-good: #a7c9ac;
+  --sm-line: color-mix(in srgb, currentColor 11%, transparent);
+  --sm-surface: color-mix(in srgb, currentColor 3%, transparent);
+  width: 100%;
+  min-width: 0;
+  max-width: 1120px;
+  margin: 0 auto;
+  padding: 14px 12px 40px;
+  box-sizing: border-box;
+  color: inherit;
+  font: inherit;
+  line-height: 1.65;
+}
+.socialmedia-desk * {
+  box-sizing: border-box;
+}
+.socialmedia-desk [hidden] {
+  display: none !important;
+}
+.socialmedia-desk h2,
+.socialmedia-desk h3,
+.socialmedia-desk h4 {
+  font-family: inherit;
+  font-weight: 600;
+  color: inherit;
+}
+.socialmedia-desk h2 {
+  font-size: 24px;
+  letter-spacing: 0.025em;
+  margin: 0 0 4px;
+}
+.socialmedia-desk h3 {
+  font-size: 18px;
+  margin: 0 0 8px;
+}
+.socialmedia-desk h4 {
+  font-size: 17px;
+  line-height: 1.65;
+  margin: 6px 0 4px;
+  overflow-wrap: anywhere;
+}
+.socialmedia-desk p {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin: 8px 0;
+}
+.socialmedia-desk > header {
+  margin-bottom: 18px;
+}
+.socialmedia-desk > header p {
+  margin: 0;
+}
+.socialmedia-desk .sm-muted,
+.socialmedia-desk small {
+  display: block;
+  opacity: 0.66;
+  font-size: 12px;
+  line-height: 1.7;
+}
+.socialmedia-desk .sm-summary {
+  font-size: 12px;
+  opacity: 0.66;
+  margin: 0 0 16px;
+}
+.socialmedia-desk .sm-overview {
+  display: flex;
+  gap: 26px;
+  margin: 0 0 24px;
+  padding: 0 0 18px;
+  border-bottom: 1px solid var(--sm-line);
+  flex-wrap: wrap;
+}
+.socialmedia-desk .sm-metric {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 12px;
+  opacity: 0.85;
+}
+.socialmedia-desk .sm-metric strong {
+  font-weight: 600;
+  font-size: 19px;
+  font-variant-numeric: tabular-nums;
+}
+.socialmedia-desk button,
+.socialmedia-desk select,
+.socialmedia-desk input:not([type='checkbox']),
+.socialmedia-desk textarea {
+  font: inherit;
+  font-size: 13px;
+  color: inherit;
+  border: 1px solid var(--sm-line);
+  border-radius: 10px;
+  background: var(--sm-surface);
+  padding: 9px 13px;
+  min-width: 0;
+}
+.socialmedia-desk button,
+.socialmedia-desk summary,
+.socialmedia-desk select {
+  cursor: pointer;
+}
+.socialmedia-desk button:hover {
+  border-color: var(--sm-accent);
+  background: color-mix(in srgb, var(--sm-accent) 8%, transparent);
+}
+.socialmedia-desk button:disabled {
+  opacity: 0.45;
+  cursor: wait;
+}
+.socialmedia-desk :focus-visible {
+  outline: 2px solid var(--sm-accent);
+  outline-offset: 3px;
+}
+.socialmedia-desk input[type='checkbox'] {
+  accent-color: var(--sm-accent);
+  width: 17px;
+  height: 17px;
+}
+.socialmedia-desk .sm-alert,
+.socialmedia-desk .sm-feedback {
+  border-radius: 12px;
+  padding: 12px 16px;
+  font-size: 13px;
+  margin: 12px 0 20px;
+}
+.socialmedia-desk .sm-alert {
+  background: color-mix(in srgb, #d8ac72 9%, transparent);
+  border: 1px solid color-mix(in srgb, #d8ac72 30%, transparent);
+}
+.socialmedia-desk .sm-feedback {
+  background: color-mix(in srgb, var(--sm-good) 8%, transparent);
+  color: var(--sm-good);
+}
+.socialmedia-desk .sm-feed-heading {
+  display: flex;
+  align-items: baseline;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+.socialmedia-desk .sm-feed-heading h3 {
+  margin: 0;
+}
+.socialmedia-desk .sm-feed-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 0 0 20px;
+  align-items: center;
+}
+.socialmedia-desk .sm-feed-toolbar input {
+  flex: 1;
+  min-width: 160px;
+}
+.socialmedia-desk .sm-filters {
+  display: flex;
+  gap: 3px;
+  padding: 3px;
+  border-radius: 12px;
+  background: var(--sm-surface);
+  border: 1px solid var(--sm-line);
+}
+.socialmedia-desk .sm-filters button {
+  border: 0;
+  background: transparent;
+  padding: 7px 12px;
+  border-radius: 8px;
+  font-size: 12px;
+}
+.socialmedia-desk .sm-filters button[aria-pressed='true'] {
+  background: color-mix(in srgb, var(--sm-accent) 15%, transparent);
+  color: var(--sm-accent);
+}
+/* Content follows the host page. No nested vertical scroll boxes or wheel interception. */
+.socialmedia-desk .sm-timeline {
+  min-width: 0;
+  overflow: visible;
+}
+.socialmedia-desk .sm-video {
+  margin: 0 0 16px;
+  border: 1px solid var(--sm-line);
+  border-radius: 18px;
+  background: var(--sm-surface);
+}
+.socialmedia-desk .sm-video-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  list-style: none;
+  padding: 21px 24px;
+  border-radius: 18px;
+  transition: background 0.15s ease;
+}
+.socialmedia-desk summary::-webkit-details-marker {
+  display: none;
+}
+.socialmedia-desk .sm-video-header:hover {
+  background: color-mix(in srgb, var(--sm-accent) 9%, transparent);
+}
+.socialmedia-desk .sm-video-header > div {
+  min-width: 0;
+}
+.socialmedia-desk .sm-eyebrow {
+  font-size: 11px;
+  color: var(--sm-accent);
+  letter-spacing: 0.04em;
+}
+.socialmedia-desk .sm-video-side {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.socialmedia-desk .sm-video-side time {
+  font-size: 11px;
+  opacity: 0.5;
+  font-variant-numeric: tabular-nums;
+}
+.socialmedia-desk .sm-open-label {
+  font-size: 12px;
+  color: var(--sm-accent);
+}
+.socialmedia-desk .sm-open-label:after {
+  content: ' ＋';
+  display: inline-block;
+}
+.socialmedia-desk .sm-video[open] > .sm-video-header {
+  border-bottom: 1px solid var(--sm-line);
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+}
+.socialmedia-desk .sm-video[open] > .sm-video-header .sm-open-label {
+  font-size: 0;
+}
+.socialmedia-desk .sm-video[open] > .sm-video-header .sm-open-label:after {
+  content: '收起对话 −';
+  font-size: 12px;
+}
+.socialmedia-desk a {
+  color: var(--sm-accent);
+  text-decoration: none;
+  font-size: 12px;
+}
+.socialmedia-desk a:hover {
+  text-decoration: underline;
+}
+.socialmedia-desk .sm-video-tools {
+  padding: 12px 24px 0;
+  text-align: right;
+}
+.socialmedia-desk .sm-thread {
+  margin: 0 24px;
+  border-bottom: 1px solid var(--sm-line);
+}
+.socialmedia-desk .sm-thread:last-child {
+  border: 0;
+}
+.socialmedia-desk .sm-event {
+  padding: 18px 0;
+  border-bottom: 1px solid var(--sm-line);
+}
+.socialmedia-desk .sm-event:last-child {
+  border: 0;
+}
+.socialmedia-desk .sm-outgoing {
+  border-left: 2px solid color-mix(in srgb, var(--sm-accent) 38%, transparent);
+  padding-left: 16px;
+  margin: 10px 0 18px;
+}
+.socialmedia-desk .sm-event-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.socialmedia-desk .sm-event-meta time {
+  font-size: 11px;
+  opacity: 0.48;
+  white-space: nowrap;
+}
+.socialmedia-desk .sm-tags {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.socialmedia-desk .sm-tag {
+  font-size: 10px;
+  line-height: 1.7;
+  border-radius: 6px;
+  background: color-mix(in srgb, currentColor 5%, transparent);
+  padding: 2px 7px;
+  opacity: 0.75;
+}
+.socialmedia-desk .sm-tag-good {
+  color: var(--sm-good);
+}
+.socialmedia-desk .sm-tag-wait {
+  color: #e3c287;
+  background: color-mix(in srgb, #e3c287 8%, transparent);
+}
+.socialmedia-desk .sm-tag-note {
+  color: #d9b298;
+}
+.socialmedia-desk .sm-tag-quiet {
+  opacity: 0.5;
+}
+.socialmedia-desk .sm-speaker {
+  font-size: 12px;
+  font-weight: 500;
+  opacity: 0.65;
+}
+.socialmedia-desk .sm-body,
+.socialmedia-desk .sm-preview {
+  font-size: 14px;
+  line-height: 1.9;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.socialmedia-desk blockquote {
+  margin: 10px 0;
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: color-mix(in srgb, currentColor 3%, transparent);
+  border-left: 2px solid var(--sm-line);
+  font-size: 12px;
+}
+.socialmedia-desk blockquote p {
+  margin: 4px 0;
+  max-height: none;
+  overflow: visible;
+}
+.socialmedia-desk .sm-event-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 10px;
+  font-size: 12px;
+}
+.socialmedia-desk .sm-event-actions button {
+  font-size: 11px;
+  padding: 5px 9px;
+}
+.socialmedia-desk .sm-event-actions input {
+  max-width: 220px;
+}
+.socialmedia-desk .sm-receipt {
+  margin: 14px 0 0;
+}
+.socialmedia-desk .sm-receipt summary {
+  font-size: 11px;
+  opacity: 0.48;
+}
+.socialmedia-desk .sm-receipt p {
+  font-size: 12px;
+  opacity: 0.7;
+}
+.socialmedia-desk .sm-receipt[open] summary {
+  opacity: 0.8;
+}
+.socialmedia-desk .sm-long-message {
+  margin: 8px 0;
+}
+.socialmedia-desk .sm-long-message > summary {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.socialmedia-desk .sm-more {
+  font-size: 11px;
+  color: var(--sm-accent);
+}
+.socialmedia-desk .sm-long-message[open] .sm-preview {
+  display: none;
+}
+.socialmedia-desk .sm-empty {
+  padding: 44px 16px;
+  text-align: center;
+  opacity: 0.6;
+  font-size: 13px;
+}
+.socialmedia-desk .sm-settings {
+  max-width: 960px;
+}
+.socialmedia-desk .sm-config-section,
+.socialmedia-desk .sm-roaming {
+  border: 1px solid var(--sm-line);
+  border-radius: 18px;
+  padding: 24px;
+  margin: 0 0 20px;
+  background: var(--sm-surface);
+}
+.socialmedia-desk .sm-config-section > summary {
+  font-size: 16px;
+  font-weight: 600;
+  list-style: none;
+}
+.socialmedia-desk .sm-config-section > summary:after {
+  content: ' ＋';
+  color: var(--sm-accent);
+  float: right;
+}
+.socialmedia-desk .sm-config-section[open] > summary:after {
+  content: ' −';
+}
+.socialmedia-desk .sm-config-section[open] > summary {
+  margin-bottom: 16px;
+}
+.socialmedia-desk .sm-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px 24px;
+  margin: 18px 0;
+}
+.socialmedia-desk .sm-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+.socialmedia-desk .sm-toolbar {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+  margin: 18px 0 0;
+}
+.socialmedia-desk .sm-login {
+  margin-top: 20px;
+}
+.socialmedia-desk .sm-login img {
+  background: white;
+  border-radius: 14px;
+  padding: 10px;
+}
+.socialmedia-desk textarea {
+  display: block;
+  width: 100%;
+  min-height: 80px;
+  margin: 12px 0;
+}
+.socialmedia-desk .sm-presets {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin: 20px 0;
+}
+.socialmedia-desk .sm-presets button {
+  display: flex;
+  flex-direction: column;
+  text-align: left;
+  gap: 8px;
+  border-radius: 14px;
+  padding: 18px 16px;
+  line-height: 1.5;
+  white-space: normal;
+}
+.socialmedia-desk .sm-presets strong {
+  font-size: 17px;
+  font-weight: 600;
+}
+.socialmedia-desk .sm-presets span {
+  font-size: 13px;
+}
+.socialmedia-desk .sm-presets small {
+  font-size: 11px;
+  opacity: 0.6;
+}
+.socialmedia-desk .sm-presets button[aria-pressed='true'] {
+  border-color: var(--sm-accent);
+  background: color-mix(in srgb, var(--sm-accent) 13%, transparent);
+}
+.socialmedia-desk .sm-roam-fields {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+  margin: 16px 0;
+}
+.socialmedia-desk .sm-roam-fields label {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 12px;
+}
+.socialmedia-desk .sm-roam-fields input {
+  width: 100%;
+}
+.socialmedia-desk .sm-config-field {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(120px, 36%);
+  align-items: center;
+  gap: 24px;
+  border-top: 1px solid var(--sm-line);
+  padding: 18px 0;
+}
+.socialmedia-desk .sm-config-field strong {
+  font-size: 13px;
+  font-weight: 500;
+}
+.socialmedia-desk .sm-config-field small {
+  margin-top: 5px;
+}
+.socialmedia-desk .sm-config-field input[type='checkbox'] {
+  justify-self: end;
+}
+.socialmedia-desk .sm-config-field input,
+.socialmedia-desk .sm-config-field select {
+  width: 100%;
+}
+.socialmedia-desk .sm-config-field input[type='checkbox'] {
+  width: 17px;
+}
+.socialmedia-desk .sm-reading-notes {
+  padding: 20px 24px;
+  border: 1px solid var(--sm-line);
+  border-radius: 18px;
+}
+.socialmedia-desk .sm-reading-notes article {
+  padding: 14px 0;
+  border-bottom: 1px solid var(--sm-line);
+}
+.socialmedia-desk .sm-reading-notes a {
+  display: block;
+}
+@media (max-width: 720px) {
+  .socialmedia-desk {
+    padding: 8px 4px 28px;
+  }
+  .socialmedia-desk .sm-feed-toolbar input {
+    flex-basis: 100%;
+    order: 2;
+  }
+  .socialmedia-desk .sm-feed-toolbar select {
+    flex: 1;
+    max-width: 100%;
+  }
+  .socialmedia-desk .sm-video-header {
+    align-items: flex-start;
+    padding: 18px;
+    gap: 14px;
+    flex-direction: column;
+  }
+  .socialmedia-desk .sm-video-side {
+    flex-direction: row;
+    width: 100%;
+    justify-content: space-between;
+  }
+  .socialmedia-desk .sm-thread {
+    margin: 0 18px;
+  }
+  .socialmedia-desk .sm-video-tools {
+    padding-right: 18px;
+  }
+  .socialmedia-desk .sm-config-section,
+  .socialmedia-desk .sm-roaming {
+    padding: 18px;
+  }
+  .socialmedia-desk .sm-presets {
+    grid-template-columns: 1fr;
+  }
+  .socialmedia-desk .sm-roam-fields {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .socialmedia-desk .sm-config-field {
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+  .socialmedia-desk .sm-event-meta {
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .socialmedia-desk h2 {
+    font-size: 22px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .socialmedia-desk * {
+    transition: none !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+.socialmedia-desk .sm-focus-card {
+  border: 1px solid var(--sm-line);
+  border-radius: 18px;
+  margin: 0 0 24px;
+  background: var(--sm-surface);
+}
+.socialmedia-desk .sm-focus-card > summary {
+  padding: 16px 22px;
+  list-style: none;
+  font-size: 14px;
+  color: var(--sm-accent);
+}
+.socialmedia-desk .sm-focus-card > summary:after {
+  content: '＋';
+  float: right;
+}
+.socialmedia-desk .sm-focus-card[open] > summary:after {
+  content: '−';
+}
+.socialmedia-desk .sm-focus-body {
+  padding: 0 22px 20px;
+}
+.socialmedia-desk .sm-focus-work {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--sm-line);
+}
+.socialmedia-desk .sm-focus-work a {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+}
+.socialmedia-desk .sm-focus-work span {
+  flex-shrink: 0;
+}
+@media (max-width: 720px) {
+  .socialmedia-desk .sm-focus-work {
+    flex-direction: column;
+    gap: 5px;
+  }
+}
+
+.socialmedia-desk .sm-connection-results {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+.socialmedia-desk .sm-connection-results p {
+  margin: 0;
+  padding: 10px 14px;
+  border: 1px solid var(--sm-line);
+  border-radius: 12px;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.socialmedia-desk .sm-connection-results [data-state='success'],
+.socialmedia-desk .sm-connection-results [data-state='completed'] {
+  color: var(--sm-good);
+}
+.socialmedia-desk .sm-connection-results [data-state='error'] {
+  color: #e6ad9a;
+}
+.socialmedia-desk .sm-connection-results [data-state='checking'] {
+  color: var(--sm-accent);
+}
+
+/* Platform identity is shared by configuration, focus summaries and conversation records. */
+.socialmedia-desk [data-platform='bilibili'] {
+  --sm-accent: #72b6e0;
+}
+.socialmedia-desk [data-platform='douyin'] {
+  --sm-accent: #e38eb8;
+}
+.socialmedia-desk [data-platform='kuaishou'] {
+  --sm-accent: #efa260;
+}
+.socialmedia-desk .sm-platform-card,
+.socialmedia-desk .sm-video,
+.socialmedia-desk .sm-focus-card {
+  background:
+    linear-gradient(110deg, color-mix(in srgb, var(--sm-accent) 13%, transparent), transparent 72%),
+    var(--sm-surface);
+  border-color: color-mix(in srgb, var(--sm-accent) 36%, var(--sm-line));
+}
+.socialmedia-desk .sm-platform-card {
+  border-top: 3px solid color-mix(in srgb, var(--sm-accent) 70%, var(--sm-line));
+}
+.socialmedia-desk .sm-platform-card > h3 {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.socialmedia-desk .sm-platform-card > h3:before {
+  content: '';
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--sm-accent);
+  flex: 0 0 auto;
+}
+.socialmedia-desk .sm-platform-card > .sm-toggle {
+  margin: 10px 0;
+}
+.socialmedia-desk .sm-platform-card > .sm-toolbar {
+  margin: 12px 0 20px;
+}
+.socialmedia-desk .sm-subsection {
+  border-top: 1px solid var(--sm-line);
+  margin: 16px 0 0;
+  padding: 0;
+}
+.socialmedia-desk .sm-subsection > summary {
+  list-style: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 15px 0;
+  font-size: 13px;
+  font-weight: 550;
+}
+.socialmedia-desk .sm-subsection > summary:after {
+  content: '＋';
+  color: color-mix(in srgb, var(--sm-accent) 45%, currentColor);
+}
+.socialmedia-desk .sm-subsection[open] > summary:after {
+  content: '−';
+}
+.socialmedia-desk .sm-subsection > button {
+  margin: 8px 0 16px;
+}
+.socialmedia-desk .sm-subsection > input {
+  width: 100%;
+  margin-bottom: 10px;
+}
+.socialmedia-desk .sm-platform-card > button {
+  margin-top: 20px;
+  border-color: color-mix(in srgb, var(--sm-accent) 50%, var(--sm-line));
+}
+.socialmedia-desk .sm-platform-label {
+  display: inline-flex;
+  border-radius: 6px;
+  padding: 3px 8px;
+  background: color-mix(in srgb, var(--sm-accent) 12%, transparent);
+  color: color-mix(in srgb, var(--sm-accent) 35%, currentColor);
+}
+.socialmedia-desk .sm-outgoing {
+  border-left-color: color-mix(in srgb, var(--sm-accent) 65%, transparent);
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--sm-accent) 9%, transparent),
+    transparent 80%
+  );
+  border-radius: 0 10px 10px 0;
+  padding-right: 12px;
+}
+.socialmedia-desk .sm-focus-status {
+  white-space: pre-line;
+  opacity: 0.82;
+}
+.socialmedia-desk .sm-focus-status[data-state='warning'] {
+  border-left: 2px solid #c5a77c;
+  padding-left: 12px;
+}
+.socialmedia-desk .sm-focus-card > summary,
+.socialmedia-desk .sm-open-label {
+  color: color-mix(in srgb, var(--sm-accent) 40%, currentColor);
+}
+
+.socialmedia-desk .sm-subsection > summary {
+  flex-wrap: wrap;
+}
+.socialmedia-desk .sm-fold-status {
+  margin-left: auto;
+  max-width: 70%;
+  font-size: 11px;
+  font-weight: 400;
+  opacity: 0.72;
+}
+@media (max-width: 520px) {
+  .socialmedia-desk .sm-fold-status {
+    max-width: 100%;
+    margin-left: 0;
+    flex-basis: 100%;
+    order: 2;
+  }
+}
+
+.socialmedia-desk .sm-platform-tabs {
+  display: flex;
+  gap: 10px;
+  margin: 0 0 16px;
+}
+.socialmedia-desk .sm-platform-tabs > button {
+  flex: 1;
+  border-color: color-mix(in srgb, var(--sm-accent) 26%, var(--sm-line));
+  background: color-mix(in srgb, var(--sm-accent) 9%, transparent);
+  color: color-mix(in srgb, var(--sm-accent) 25%, currentColor);
+  font-weight: 500;
+}
+.socialmedia-desk .sm-platform-tabs > button[aria-selected='true'] {
+  border-color: color-mix(in srgb, var(--sm-accent) 75%, var(--sm-line));
+  background: color-mix(in srgb, var(--sm-accent) 16%, transparent);
+  box-shadow: inset 0 -2px 0 color-mix(in srgb, var(--sm-accent) 70%, transparent);
+}
+
+.socialmedia-desk .sm-presets-compact button {
+  padding: 10px;
+  gap: 3px;
+}
+.socialmedia-desk .sm-presets-compact strong {
+  font-size: 13px;
+}
+.socialmedia-desk a {
+  color: color-mix(in srgb, var(--sm-accent) 50%, currentColor);
+}
+
+.socialmedia-desk .sm-roaming-master {
+  padding: 18px 22px;
+}
+.socialmedia-desk .sm-roaming-master h3 {
+  font-size: 16px;
+}
+.socialmedia-desk .sm-roaming-master > .sm-toggle {
+  margin: 10px 0;
+}
+.socialmedia-desk .sm-roaming-states {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 0;
+}
+.socialmedia-desk .sm-platform-state {
+  font-size: 12px;
+  border: 1px solid color-mix(in srgb, var(--sm-accent) 36%, var(--sm-line));
+  border-radius: 8px;
+  padding: 6px 10px;
+  background: color-mix(in srgb, var(--sm-accent) 9%, transparent);
+}
+.socialmedia-desk .sm-platform-savebar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--sm-line);
+}
+.socialmedia-desk .sm-platform-savebar > small:last-child {
+  flex-basis: 100%;
+}
+.socialmedia-desk .sm-maintenance > button {
+  margin-right: 8px;
+}
+
+/* Expanded groups form a visible parent/child hierarchy without nested scrolling. */
+.socialmedia-desk .sm-subsection {
+  border: 1px solid var(--sm-line);
+  border-radius: 12px;
+  padding: 0 16px;
+  transition:
+    background-color 0.15s ease,
+    border-color 0.15s ease;
+}
+.socialmedia-desk .sm-subsection[open] {
+  background: color-mix(in srgb, var(--sm-accent) 7%, transparent);
+  border-left: 3px solid color-mix(in srgb, var(--sm-accent) 65%, var(--sm-line));
+  padding-bottom: 16px;
+}
+.socialmedia-desk .sm-subsection[open] > summary {
+  border-bottom: 1px solid color-mix(in srgb, var(--sm-accent) 20%, var(--sm-line));
+  margin-bottom: 12px;
+  color: color-mix(in srgb, var(--sm-accent) 42%, currentColor);
+}
+.socialmedia-desk .sm-subsection .sm-subsection {
+  margin-left: 12px;
+  background: color-mix(in srgb, currentColor 3%, transparent);
+  border-radius: 8px;
+}
+.socialmedia-desk .sm-subsection .sm-config-field:last-child {
+  border-bottom: 0;
+}
+.socialmedia-desk .sm-video[open] > .sm-video-header {
+  background: color-mix(in srgb, var(--sm-accent) 11%, transparent);
+}
+.socialmedia-desk .sm-video[open] .sm-thread {
+  border-left: 2px solid color-mix(in srgb, var(--sm-accent) 27%, var(--sm-line));
+  padding-left: 16px;
+}
+.socialmedia-desk summary:focus-visible {
+  outline: 2px solid var(--sm-accent);
+  outline-offset: 3px;
+}
+@media (max-width: 520px) {
+  .socialmedia-desk .sm-subsection {
+    padding-left: 12px;
+    padding-right: 12px;
+  }
+  .socialmedia-desk .sm-subsection .sm-subsection {
+    margin-left: 4px;
+  }
+  .socialmedia-desk .sm-video[open] .sm-thread {
+    padding-left: 12px;
+  }
+}
+
+.socialmedia-desk .sm-capabilities {
+  margin: 0 0 20px;
+  border: 1px solid var(--sm-line);
+  border-radius: 12px;
+  padding: 0 16px;
+  background: var(--sm-surface);
+}
+.socialmedia-desk .sm-capabilities > summary {
+  padding: 14px 0;
+}
+.socialmedia-desk .sm-capability-platform {
+  margin: 16px 0;
+  padding-left: 16px;
+  border-left: 3px solid var(--sm-accent);
+}
+.socialmedia-desk .sm-capability-platform h3 {
+  font-size: 14px;
+}
+.socialmedia-desk .sm-capability-platform dl {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: 8px 12px;
+  margin: 8px 0 0;
+  font-size: 12px;
+}
+.socialmedia-desk .sm-capability-platform dt {
+  font-weight: 600;
+}
+.socialmedia-desk .sm-capability-platform dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+@media (max-width: 520px) {
+  .socialmedia-desk .sm-capability-platform dl {
+    grid-template-columns: 1fr;
+    gap: 4px;
+  }
+  .socialmedia-desk .sm-capability-platform dd {
+    margin-bottom: 8px;
+  }
+}
