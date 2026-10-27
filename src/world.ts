@@ -9,6 +9,7 @@ import { Conversation } from './conversation.ts';
 import type { CommentTarget, SocialPlatform } from './platform.ts';
 import { KuaishouPlatform, kuaishouVideoId } from './platforms/kuaishou.ts';
 import { matchesPostedDynamic } from './platforms/bilibili-dynamic-publish.ts';
+import { DynamicAutonomy } from './dynamic-autonomy.ts';
 import { DynamicPublishing, type DynamicPost } from './dynamic-publishing.ts';
 import { reviewDraft } from './conversation.ts';
 import { dynamicId } from './platforms/bilibili-dynamics.ts';
@@ -92,12 +93,14 @@ export class SocialMediaWorld implements World {
         read: (g, s) => this.douyin.readGroup(g, s),
         send: (g, d, s) => this.douyin.sendGroup(g, d, s),
       },
+      this.ctx.timezone,
     ));
   }
   private async pollGroups() {
     if (!this.groupConfig.enabled || !this.host) return;
     const host = this.host;
-    for (const batch of await this.groups.pollBatches(this.controller.signal)) {
+    const batches = await this.groups.pollBatches(this.controller.signal);
+    for (const batch of batches) {
       const activity = this.groupConfig.activity ?? 'balanced';
       await host.pushEvent({
         type: 'socialmedia.group.message',
@@ -128,6 +131,44 @@ export class SocialMediaWorld implements World {
       this.groups.deliveredBatch(batch.groupId, batch.ids);
     }
     this.groupError = undefined;
+    if (!batches.length) await this.maybeOfferGroup();
+  }
+  private async maybeOfferGroup() {
+    const host = this.host,
+      idle = this.groupConfig.proactiveIdleMinutes ?? 20;
+    if (
+      !host ||
+      !this.groupConfig.proactiveEnabled ||
+      !this.groupConfig.allowSend ||
+      this.phase !== 'idle' ||
+      Date.now() - Math.max(this.idleSince, this.dynamicStartedAt) < idle * 60000 ||
+      this.service.pendingReplies().length ||
+      this.service.roaming.status().active
+    )
+      return;
+    const busy = host.store
+      .range({
+        fromTs: new Date(Date.now() - idle * 60000).toISOString(),
+        origin: 'external',
+        limit: 100,
+      })
+      .some(
+        (e) =>
+          !e.tags?.includes('speak') &&
+          /^(qq\.|dungeon\.|socialmedia\.(comment|group\.message))/.test(e.type),
+      );
+    if (busy) return;
+    const offer = this.groups.offerProactive();
+    if (!offer) return;
+    await host.pushEvent({
+      type: 'socialmedia.group.invite',
+      source: this.id,
+      origin: 'internal',
+      ts: nowIso(this.ctx.timezone),
+      text:
+        '现在有一个可放弃的抖音群新话题机会，只能去下面指定的本地群。没有新消息不代表读取失败，也不必硬找话。愿意聊时先socialmedia_groupchat read核对现状；用prepare、send，replyTo留空，准备后已出现新聊天就顺着新话题或放弃。不要搬运QQ、Dungeon、私人记忆或其他群文案。' +
+        JSON.stringify(offer),
+    });
   }
 
   private controller = new AbortController();
@@ -191,7 +232,32 @@ export class SocialMediaWorld implements World {
       async (target, text, signal, expectedAccountId, mention) => {
         if ((ctx.cfg.platforms.bilibili.posting.transport ?? 'browser') === 'browser') {
           if (mention) throw Error('主动@需要显式选择接口发评；未自动切换或提交。');
-          return this.browserSender.send(target, text, signal, expectedAccountId);
+          if (target.type === 1)
+            return this.browserSender.send(target, text, signal, expectedAccountId);
+          const accountId =
+            expectedAccountId ??
+            this.service.status().platforms.find((p) => p.id === 'bilibili')?.account?.id ??
+            '';
+          const cached = this.service.store
+            .dynamics(accountId)
+            .find((d) => d.target?.oid === target.oid && d.target?.type === target.type);
+          const notice = this.service.store
+            .inbox()
+            .find(
+              (i) =>
+                i.platform === 'bilibili' &&
+                i.accountId === accountId &&
+                i.target.oid === target.oid &&
+                i.target.type === target.type &&
+                i.url,
+            );
+          return this.browserSender.send(
+            target,
+            text,
+            signal,
+            expectedAccountId,
+            cached?.url ?? notice?.url,
+          );
         }
         const direct = new BilibiliPlatform(
           () => ctx.secret(SOCIALMEDIA_SECRET),
@@ -313,10 +379,39 @@ export class SocialMediaWorld implements World {
     }
     return brief;
   }
+  private dynamicRetryAt = 0;
+  private dynamicStartedAt = Date.now();
+  private get autonomousDynamics() {
+    const d = this.ctx.cfg.platforms.bilibili.dynamics;
+    return new DynamicAutonomy(
+      this.service.store,
+      () => ({
+        enabled: !!(
+          this.ctx.cfg.enabled &&
+          this.ctx.cfg.platforms.bilibili.enabled &&
+          d?.allowPublishing &&
+          d.autonomousEnabled
+        ),
+        maxDaily: d?.autoMaxDaily ?? 1,
+        minIntervalMinutes: d?.autoMinIntervalMinutes ?? 360,
+        startHour: d?.autoStartHour ?? 9,
+        endHour: d?.autoEndHour ?? 23,
+        maxDailyPosts: d?.maxDailyPosts ?? 3,
+      }),
+      this.ctx.timezone,
+    );
+  }
   private dynamicPublishAllowed(draft?: DynamicPost) {
     const cfg = this.ctx.cfg,
       b = cfg.platforms.bilibili;
     if (!cfg.enabled || !b.enabled || !b.dynamics?.allowPublishing) return false;
+    if (draft?.autonomous) {
+      try {
+        this.autonomousDynamics.authorize(draft.accountId, draft.offerId ?? '', true);
+      } catch {
+        return false;
+      }
+    }
     if (draft?.mention) {
       const binding = this.service.focus.binding(draft.accountId);
       if (!cfg.focus.enabled || !cfg.focus.allowMentions || binding?.ownerId !== draft.mention.id)
@@ -353,6 +448,7 @@ export class SocialMediaWorld implements World {
       () => ({
         enabled: !!(this.ctx.cfg.enabled && this.ctx.cfg.platforms.bilibili.enabled),
         allowPublishing: !!this.ctx.cfg.platforms.bilibili.dynamics?.allowPublishing,
+        autonomousEnabled: !!this.ctx.cfg.platforms.bilibili.dynamics?.autonomousEnabled,
         maxDailyPosts: this.ctx.cfg.platforms.bilibili.dynamics?.maxDailyPosts ?? 3,
         minIntervalSec: this.ctx.cfg.platforms.bilibili.dynamics?.minIntervalSec ?? 300,
       }),
@@ -387,6 +483,8 @@ export class SocialMediaWorld implements World {
       const draft = this.service.store
         .dynamicPosts(account.id)
         .find((r) => r.id === text(args.draftId, 80));
+      if (draft?.status === 'prepared' && draft.autonomous)
+        this.autonomousDynamics.authorize(account.id, draft.offerId ?? '');
       if (draft?.status === 'prepared' && !this.dynamicPublishAllowed(draft))
         throw Error('动态发布或@权限、绑定已关闭或变化，尚未提交。');
       return publisher.publish(account.id, text(args.draftId, 80));
@@ -413,7 +511,9 @@ export class SocialMediaWorld implements World {
         throw Error('未核实到特别关注的准确UID和名称，尚未准备@。');
       mention = { id: binding.ownerId, name };
     }
-    const draft = publisher.prepare(account.id, args.text, mention);
+    const offerId = args.offerId === undefined ? undefined : text(args.offerId, 80);
+    if (offerId) this.autonomousDynamics.authorize(account.id, offerId);
+    const draft = publisher.prepare(account.id, args.text, mention, offerId);
     return {
       ...draft,
       advice: [
@@ -1014,7 +1114,9 @@ export class SocialMediaWorld implements World {
     const cycle = () => {
       if (this.controller.signal.aborted) return;
       this.tick = this.sync()
-        .then(() => this.maybeOfferRoam())
+        .then(async () => {
+          if (!(await this.maybeOfferDynamic())) await this.maybeOfferRoam();
+        })
         .catch((e) => {
           this.lastError = e instanceof Error ? e.message : '同步失败';
         })
@@ -1063,6 +1165,60 @@ export class SocialMediaWorld implements World {
   onRunPhase(phase: RunPhase) {
     if (phase.state === 'idle' && this.phase !== 'idle') this.idleSince = Date.now();
     this.phase = phase.state;
+  }
+  private async maybeOfferDynamic() {
+    const host = this.host,
+      d = this.ctx.cfg.platforms.bilibili.dynamics;
+    if (
+      !host ||
+      !this.dynamicPublishAllowed() ||
+      !d?.autonomousEnabled ||
+      this.phase !== 'idle' ||
+      Date.now() < this.dynamicRetryAt ||
+      !this.ctx.secret(SOCIALMEDIA_SECRET)
+    )
+      return false;
+    const idle = d.autoIdleMinutes ?? 20;
+    if (
+      Date.now() - this.dynamicStartedAt < idle * 60000 ||
+      this.service.pendingReplies().length ||
+      this.service.roaming.status().active
+    )
+      return false;
+    const quiet = () =>
+      !host.store
+        .range({
+          fromTs: new Date(Date.now() - idle * 60000).toISOString(),
+          origin: 'external',
+          limit: 100,
+        })
+        .some(
+          (e) =>
+            !e.tags?.includes('speak') &&
+            /^(qq\.|dungeon\.|socialmedia\.(comment|group\.message))/.test(e.type),
+        );
+    if (!quiet()) return false;
+    try {
+      const account =
+        this.service.status().platforms.find((p) => p.id === 'bilibili')?.account ??
+        (await this.service.connect('bilibili', this.controller.signal));
+      if (this.phase !== 'idle' || !quiet() || this.service.pendingReplies().length) return false;
+      const offer = this.autonomousDynamics.offer(account.id);
+      if (!offer) return false;
+      await host.pushEvent({
+        type: 'socialmedia.dynamic',
+        source: this.id,
+        origin: 'internal',
+        ts: nowIso(this.ctx.timezone),
+        text:
+          '现在有一个可放弃的B站主动动态机会。可以分享适合公开的想法、兴趣或已经核实的内容，不搬运QQ、Dungeon及私人记忆，不把虚拟经历说成真实生活；没有想说的就不发。愿意发时用socialmedia_dynamic prepare携offerId及text，核对草稿后publish只传draftId；不要默认@主人，也不要为赶额度凑内容。机会：' +
+          JSON.stringify(offer),
+      });
+      return true;
+    } catch {
+      this.dynamicRetryAt = Date.now() + 1800000;
+      return false;
+    }
   }
   private async maybeOfferRoam() {
     const host = this.host;
@@ -1490,6 +1646,15 @@ export class SocialMediaWorld implements World {
             .poll(adapter, account, this.controller.signal, true);
           return this.snapshot();
         }
+        if (method === 'commentOperation') {
+          if (panel !== 'settings' || !['prepare', 'publish', 'comments'].includes(String(args[0])))
+            throw Error('仅支持本地配置页的评论准备、读取与发布。');
+          return this.run(
+            'socialmedia_' + args[0],
+            (args[1] ?? {}) as Record<string, unknown>,
+            this.controller.signal,
+          );
+        }
         if (method === 'publish') {
           const input = args[0];
           if (!input || typeof input !== 'object' || Array.isArray(input))
@@ -1524,10 +1689,15 @@ export class SocialMediaWorld implements World {
                 ? { oid: video.aid, type: 1, root: '0', parent: '0' }
                 : undefined);
           if (!raw) throw new Error('尚无视频目标；请先读取一个视频或在检查时提供评论目标。');
-          return this.browserSender.check(
-            this.bilibili.normalizeTarget(raw),
-            this.controller.signal,
-          );
+          const target = this.bilibili.normalizeTarget(raw);
+          const accountId =
+            this.service.status().platforms.find((p) => p.id === 'bilibili')?.account?.id ?? '';
+          const dynamic = this.service.store
+            .dynamics(accountId)
+            .find((d) => d.target?.type === target.type && d.target?.oid === target.oid);
+          return dynamic
+            ? this.browserSender.check(target, this.controller.signal, dynamic.url)
+            : this.browserSender.check(target, this.controller.signal);
         }
         if (method === 'connect') return this.service.connect('bilibili', this.controller.signal);
         if (method === 'sync') {

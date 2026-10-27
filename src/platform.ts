@@ -86,6 +86,7 @@ export interface VisibilityReport {
   platformState?: number;
 }
 export interface SendRecord {
+  resourceUrl?: string;
   mention?: FocusMention;
   ownerAutoReply?: boolean;
   focusOwnerId?: string;

@@ -863,13 +863,11 @@ it('prepares account-bound dynamic drafts, uses separate publishing opt-in and r
     text: expect.stringContaining('关闭'),
   });
   x.cfg.platforms.bilibili.dynamics!.allowPublishing = true;
-  const send = vi
-    .spyOn(x.world.browserSender, 'publishDynamic')
-    .mockResolvedValue({
-      status: 'sent',
-      dynamicId: '1261990610011684873',
-      url: 'https://t.bilibili.com/1261990610011684873',
-    });
+  const send = vi.spyOn(x.world.browserSender, 'publishDynamic').mockResolvedValue({
+    status: 'sent',
+    dynamicId: '1261990610011684873',
+    url: 'https://t.bilibili.com/1261990610011684873',
+  });
   const result = (await tool.handler({ action: 'publish', draftId: draft.id }, {} as never)) as any;
   expect(JSON.parse(result.text)).toMatchObject({ status: 'sent' });
   await tool.handler({ action: 'publish', draftId: draft.id }, {} as never);
@@ -879,4 +877,115 @@ it('prepares account-bound dynamic drafts, uses separate publishing opt-in and r
   expect(
     await tool.handler({ action: 'prepare', text: '想分享', mentionFocus: true }, {} as never),
   ).toMatchObject({ failed: true, text: expect.stringContaining('允许@') });
+});
+
+it('offers an autonomous dynamic only after quiet idle, without sending and without repeated wakeups', async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date('2026-10-27T12:00:00Z'));
+  const x = setup();
+  x.cfg.enabled = true;
+  x.cfg.platforms.bilibili.dynamics = {
+    enabled: true,
+    allowPublishing: true,
+    autonomousEnabled: true,
+    autoIdleMinutes: 1,
+    autoMaxDaily: 1,
+    autoMinIntervalMinutes: 360,
+    autoStartHour: 9,
+    autoEndHour: 23,
+  };
+  x.ctx.storeSecret('cookie', 'SESSDATA=test;bili_jct=test;DedeUserID=42');
+  let recent = false;
+  const events: any[] = [];
+  const host = {
+    store: { range: () => (recent ? [{ type: 'qq.message' }] : []) },
+    pushEvent: async (e: any) => {
+      events.push(e);
+      return { cursor: events.length };
+    },
+  } as unknown as WorldHost;
+  try {
+    await x.world.start(host);
+    x.world.onRunPhase({ state: 'model', enteredAt: new Date().toISOString(), running: [] });
+    await vi.advanceTimersByTimeAsync(70000);
+    expect(events).toHaveLength(0);
+    x.world.onRunPhase({ state: 'idle', enteredAt: new Date().toISOString(), running: [] });
+    recent = true;
+    await vi.advanceTimersByTimeAsync(70000);
+    expect(events).toHaveLength(0);
+    recent = false;
+    await vi.advanceTimersByTimeAsync(10000);
+    expect(events.filter((e) => e.type === 'socialmedia.dynamic')).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(events.filter((e) => e.type === 'socialmedia.dynamic')).toHaveLength(1);
+    expect((x.world as any).service.store.dynamicPosts('42')).toHaveLength(0);
+  } finally {
+    await x.world.stop();
+    vi.useRealTimers();
+  }
+});
+
+it('offers a group topic only while quiet and idle, never sends automatically and does not repeat opportunities', async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date('2026-10-27T12:00:00Z'));
+  const x = setup(),
+    events: any[] = [];
+  let recent = false;
+  x.cfg.enabled = true;
+  x.cfg.platforms.douyin.enabled = true;
+  x.cfg.platforms.douyin.chat = {
+    enabled: true,
+    allowSend: true,
+    groups: '123456|测试群',
+    intervalSec: 60,
+    minIntervalSec: 30,
+    maxDailyMessages: 100,
+    proactiveEnabled: true,
+    proactiveIdleMinutes: 5,
+    proactiveMaxDaily: 1,
+  };
+  vi.spyOn(x.world.douyin, 'readGroup').mockResolvedValue({
+    accountId: 'bot',
+    conversationId: 'conv',
+    name: '测试群',
+    messages: [
+      {
+        id: 'old',
+        senderId: 'u',
+        sender: '甲',
+        text: '昨天的背景',
+        own: false,
+        time: Date.now() - 86400000,
+        conversationId: 'conv',
+        serverStatus: 0,
+      },
+    ],
+  });
+  const send = vi.spyOn(x.world.douyin, 'sendGroup');
+  try {
+    await x.world.webUi().invoke!('settings', 'groupCheck', []);
+    await x.world.start({
+      store: { range: () => (recent ? [{ type: 'qq.message' }] : []) },
+      pushEvent: async (e: any) => {
+        events.push(e);
+        return { cursor: events.length };
+      },
+    } as unknown as WorldHost);
+    x.world.onRunPhase({ state: 'model', enteredAt: new Date().toISOString(), running: [] });
+    await vi.advanceTimersByTimeAsync(360000);
+    expect(events.filter((e) => e.type === 'socialmedia.group.invite')).toHaveLength(0);
+    x.world.onRunPhase({ state: 'idle', enteredAt: new Date().toISOString(), running: [] });
+    recent = true;
+    await vi.advanceTimersByTimeAsync(360000);
+    expect(events.filter((e) => e.type === 'socialmedia.group.invite')).toHaveLength(0);
+    recent = false;
+    await vi.advanceTimersByTimeAsync(61000);
+    expect(events.filter((e) => e.type === 'socialmedia.group.invite')).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(360000);
+    expect(events.filter((e) => e.type === 'socialmedia.group.invite')).toHaveLength(1);
+    expect(send).not.toHaveBeenCalled();
+  } finally {
+    await x.world.stop();
+    vi.useRealTimers();
+  }
 });

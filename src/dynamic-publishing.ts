@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto';
 import type { FocusMention } from './platform.ts';
 import { SocialStore } from './store.ts';
 export interface DynamicPost {
+  autonomous?: boolean;
+  offerId?: string;
   id: string;
   accountId: string;
   text: string;
@@ -44,7 +46,12 @@ export class DynamicPublishing {
   records(accountId: string) {
     return this.store.dynamicPosts(accountId).slice(-20).reverse();
   }
-  prepare(accountId: string, input: unknown, mention?: FocusMention): DynamicPost {
+  prepare(
+    accountId: string,
+    input: unknown,
+    mention?: FocusMention,
+    offerId?: string,
+  ): DynamicPost {
     const text = dynamicText(input);
     if (!/^[1-9]\d{0,23}$/.test(accountId)) throw Error('动态账号无效。');
     if (
@@ -69,6 +76,7 @@ export class DynamicPublishing {
     const r: DynamicPost = {
       id: randomUUID(),
       accountId,
+      ...(offerId ? { autonomous: true, offerId } : {}),
       text,
       ...(mention ? { mention } : {}),
       createdAt: new Date(this.clock()).toISOString(),
@@ -91,8 +99,11 @@ export class DynamicPublishing {
     const day = (date: string) =>
       new Intl.DateTimeFormat('en-CA', { timeZone: this.timezone }).format(new Date(date));
     if (
-      records.filter((x) => day(x.attemptedAt!) === day(new Date(this.clock()).toISOString()))
-        .length >= cfg.maxDailyPosts
+      records.filter(
+        (x) =>
+          x.status !== 'rejected' &&
+          day(x.attemptedAt!) === day(new Date(this.clock()).toISOString()),
+      ).length >= cfg.maxDailyPosts
     )
       throw Error('今日动态发布已达本地上限。');
     if (records.some((x) => this.clock() - Date.parse(x.attemptedAt!) < cfg.minIntervalSec * 1000))

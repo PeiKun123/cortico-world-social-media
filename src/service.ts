@@ -808,6 +808,13 @@ export class SocialService {
     this.store.reserve({
       id,
       operationId,
+      resourceUrl:
+        input.platform === 'bilibili' && [11, 17].includes(target.type)
+          ? (this.store
+              .dynamics(account.id)
+              .find((d) => d.target?.type === target.type && d.target?.oid === target.oid)?.url ??
+            source?.url)
+          : undefined,
       platform: input.platform,
       accountId: account.id,
       text,

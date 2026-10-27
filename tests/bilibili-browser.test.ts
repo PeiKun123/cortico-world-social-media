@@ -40,7 +40,14 @@ describe.skipIf(!findBrowserExecutable())('official page submission boundaries',
     await browser?.close();
   });
   async function fixture(
-    options: { wrongParent?: boolean; reject?: boolean; timeout?: boolean; twice?: boolean } = {},
+    options: {
+      wrongParent?: boolean;
+      reject?: boolean;
+      timeout?: boolean;
+      dynamic?: boolean;
+      wrongResource?: boolean;
+      twice?: boolean;
+    } = {},
   ) {
     const page = await browser.newPage();
     await page.context().setOffline(true);
@@ -60,16 +67,21 @@ describe.skipIf(!findBrowserExecutable())('official page submission boundaries',
       }
       await route.fulfill({
         contentType: 'text/html',
-        body: `<html><body><bili-comments><bili-comment-renderer></bili-comment-renderer><bili-comment-box></bili-comment-box></bili-comments><script>
+        body: `<html><body><bili-comments ${options.dynamic ? 'data-params="11,' + (options.wrongResource ? '98' : '99') + '"' : ''}><bili-comment-renderer></bili-comment-renderer><bili-comment-box></bili-comment-box></bili-comments><script>
         const renderer=document.querySelector('bili-comment-renderer');renderer.data={rpid_str:'101',root_str:'100'};
         renderer.attachShadow({mode:'open'}).innerHTML='<bili-comment-action-buttons-renderer><div id="reply"><button>回复</button></div></bili-comment-action-buttons-renderer>';
         const box=document.querySelector('bili-comment-box');box.reply={rpid_str:'101',root_str:'100'};box.placeholder='';
         box.attachShadow({mode:'open'}).innerHTML='<textarea></textarea><div id="pub"><button>发布</button></div>';
-        box.shadowRoot.querySelector('button').onclick=()=>{const request=()=>fetch('https://api.bilibili.com/x/v2/reply/add',{method:'POST',body:new URLSearchParams({oid:'99',type:'1',root:'100',parent:'${options.wrongParent ? '102' : '101'}',message:box.shadowRoot.querySelector('textarea').value})});request();${options.twice ? 'request();' : ''}};
+        box.shadowRoot.querySelector('button').onclick=()=>{const request=()=>fetch('https://api.bilibili.com/x/v2/reply/add',{method:'POST',body:new URLSearchParams({oid:'99',type:'${options.dynamic ? 11 : 1}',root:'100',parent:'${options.wrongParent ? '102' : '101'}',message:box.shadowRoot.querySelector('textarea').value})});request();${options.twice ? 'request();' : ''}};
       </script></body></html>`,
       });
     });
-    await page.goto(commentPageUrl(target));
+    await page.goto(
+      commentPageUrl(
+        options.dynamic ? { ...target, type: 11 } : target,
+        options.dynamic ? 'https://t.bilibili.com/1234567890123456789' : undefined,
+      ),
+    );
     return { page, accepted: () => accepted };
   }
   it('uses the visible header editor rather than a hidden unused reply box for top-level comments', async () => {
@@ -142,6 +154,27 @@ describe.skipIf(!findBrowserExecutable())('official page submission boundaries',
       expect(await page.locator('bili-comments').count()).toBe(1);
     } finally {
       await page.close();
+    }
+  });
+  it('replies in the exact dynamic thread and refuses another dynamic resource', async () => {
+    const ok = await fixture({ dynamic: true });
+    try {
+      expect(
+        (await submitCommentPage(ok.page, { ...target, type: 11 }, text, undefined, 1000))
+          .receiptId,
+      ).toBe('1234567890123456789');
+      expect(ok.accepted()).toBe(1);
+    } finally {
+      await ok.page.close();
+    }
+    const bad = await fixture({ dynamic: true, wrongResource: true });
+    try {
+      await expect(
+        submitCommentPage(bad.page, { ...target, type: 11 }, text, undefined, 1000),
+      ).rejects.toThrow('目标编号');
+      expect(bad.accepted()).toBe(0);
+    } finally {
+      await bad.page.close();
     }
   });
   it('uses the page input and sends exactly one matching request', async () => {
@@ -222,4 +255,16 @@ it('never replaces verified login with an incomplete browser cookie jar', () => 
   expect(merged).toContain('bili_jct=approved-csrf');
   expect(merged).toContain('buvid3=browser-device');
   expect(merged).not.toContain('partial-cookie');
+});
+
+it('resolves a canonical dynamic page only with a trusted URL and refuses synchronization side effects', () => {
+  const t = { ...target, type: 11 };
+  expect(() => commentPageUrl(t)).toThrow();
+  const url = new URL(commentPageUrl(t, 'https://t.bilibili.com/1234567890123456789'));
+  expect(url.origin).toBe('https://t.bilibili.com');
+  expect(url.pathname).toBe('/1234567890123456789');
+  expect(url.searchParams.get('comment_root_id')).toBe('100');
+  expect(() => commentPageUrl(t, 'https://evil.test/123')).toThrow();
+  const form = new URLSearchParams({ ...target, type: '1', message: text, is_sync: '1' });
+  expect(matchesCommentRequest(form, target, text)).toBe(false);
 });

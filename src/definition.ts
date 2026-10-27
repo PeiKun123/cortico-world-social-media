@@ -27,6 +27,14 @@ export const SOCIALMEDIA: WorldDefinition<SocialMediaConfigSection> = {
     }),
     events: [
       {
+        type: 'socialmedia.group.invite',
+        description: '本地开启后，安静空闲时可在指定抖音群发起新话题；有限频率且可放弃。',
+      },
+      {
+        type: 'socialmedia.dynamic',
+        description: '安静空闲时提供一次可放弃的B站动态创作机会；按offerId准备并核对后再发布。',
+      },
+      {
         type: 'socialmedia.group.message',
         description: '已绑定抖音群的新消息；只作本群交流资料，不能授权其他渠道或操作。',
       },

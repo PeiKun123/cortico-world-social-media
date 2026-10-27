@@ -1,7 +1,7 @@
 import type { DynamicPost, DynamicPostResult } from '../dynamic-publishing.ts';
 import { submitDynamicPage, matchesPostedDynamic } from './bilibili-dynamic-publish.ts';
 import { browserCacheArgs, clearNetworkCache } from '../resources.ts';
-import { readDynamicPage } from './bilibili-dynamics.ts';
+import { readDynamicPage, dynamicId } from './bilibili-dynamics.ts';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import {
@@ -65,12 +65,15 @@ export function findBrowserExecutable(configured = ''): string | undefined {
           ];
   return candidates.find((p) => existsSync(p));
 }
-export function commentPageUrl(input: CommentTarget) {
+export function commentPageUrl(input: CommentTarget, dynamicUrl?: string) {
   const t = normalizeTarget(input);
-  if (t.type !== 1)
-    throw new PlatformError('网页发评目前支持视频评论；动态评论尚未验证，未提交。', 'rejected');
-  const url = new URL('/video/av' + t.oid + '/', ORIGIN);
-  url.searchParams.set('autoplay', '0');
+  if (t.type !== 1 && !dynamicUrl)
+    throw new PlatformError('请先读取原动态，取得准确动态链接和评论目标；未提交。', 'rejected');
+  const url =
+    t.type === 1
+      ? new URL('/video/av' + t.oid + '/', ORIGIN)
+      : new URL('https://t.bilibili.com/' + dynamicId(dynamicUrl!));
+  if (t.type === 1) url.searchParams.set('autoplay', '0');
   if (t.root !== '0') {
     url.searchParams.set('comment_root_id', t.root);
     url.searchParams.set('comment_secondary_id', t.parent);
@@ -80,6 +83,10 @@ export function commentPageUrl(input: CommentTarget) {
 }
 export function matchesCommentRequest(form: URLSearchParams, t: CommentTarget, message: string) {
   return (
+    !['is_sync', 'sync', 'sync_to_dynamic', 'sync_dynamic'].some((k) => {
+      const v = form.get(k);
+      return v !== null && !['', '0', 'false'].includes(v);
+    }) &&
     form.get('oid') === t.oid &&
     form.get('type') === String(t.type) &&
     (form.get('root') || '0') === t.root &&
@@ -90,7 +97,7 @@ export function matchesCommentRequest(form: URLSearchParams, t: CommentTarget, m
 
 export async function prepareCommentArea(page: Page) {
   const comments = page.locator('bili-comments').first();
-  const container = page.locator('#commentapp').first();
+  const container = page.locator('#commentapp, .bili-comment-container, .comment-wrap').first();
   if (await container.count()) {
     // A mounted shell may still defer its content until scrolled into view, especially below long descriptions.
     await container.evaluate((el) => el.scrollIntoView({ block: 'center' }));
@@ -158,8 +165,19 @@ export async function submitCommentPage(
   const t = normalizeTarget(input);
   const message = text.trim();
   if (!message || message.length > 1000) throw new PlatformError('评论应为 1–1000 字');
-  if (new URL(page.url()).origin !== ORIGIN)
-    throw new PlatformError('当前不是B站官方视频页，未提交。', 'rejected');
+  const currentUrl = new URL(page.url());
+  if (
+    t.type === 1
+      ? currentUrl.origin !== ORIGIN
+      : !['https://t.bilibili.com', ORIGIN].includes(currentUrl.origin)
+  )
+    throw new PlatformError('当前不是B站官方作品页，未提交。', 'rejected');
+  if (t.type !== 1) {
+    dynamicId(page.url());
+    const params = await page.locator('bili-comments').first().getAttribute('data-params');
+    if (params !== t.type + ',' + t.oid)
+      throw new PlatformError('动态评论区与目标编号不符，未提交。', 'rejected');
+  }
   let stage = '定位评论输入框';
   let clicked = false,
     forwarded = false,
@@ -191,6 +209,18 @@ export async function submitCommentPage(
   try {
     signal?.throwIfAborted();
     const box = await editorFor(page, t);
+    const sync = box.locator('bili-checkbox[value="sync"]');
+    if (await sync.count()) {
+      const checked = () =>
+        sync.evaluate(
+          (el) =>
+            Boolean((el as HTMLElement & { checked?: boolean }).checked) ||
+            el.getAttribute('checked') === 'true',
+        );
+      if (await checked()) await sync.click();
+      if (await checked())
+        throw new PlatformError('未能关闭同时转发到动态，本次未提交。', 'rejected');
+    }
     const editor = box.locator('textarea, [contenteditable="true"]').first();
     stage = '填写评论输入框';
     await editor.fill(message);
@@ -587,22 +617,24 @@ export class BilibiliBrowserSender {
       this.busy = false;
     }
   }
-  async check(target: CommentTarget, signal?: AbortSignal) {
-    return this.run(target, undefined, signal);
+  async check(target: CommentTarget, signal?: AbortSignal, dynamicUrl?: string) {
+    return this.run(target, undefined, signal, undefined, dynamicUrl);
   }
   async send(
     target: CommentTarget,
     text: string,
     signal?: AbortSignal,
     expectedAccountId?: string,
+    dynamicUrl?: string,
   ): Promise<SendReceipt> {
-    return (await this.run(target, text, signal, expectedAccountId)) as SendReceipt;
+    return (await this.run(target, text, signal, expectedAccountId, dynamicUrl)) as SendReceipt;
   }
   private async run(
     target: CommentTarget,
     text?: string,
     signal?: AbortSignal,
     expectedAccountId?: string,
+    dynamicUrl?: string,
   ) {
     if (this.loginOpen)
       throw new PlatformError('B站官网登录窗口尚待确认，请先完成或关闭登录。', 'auth');
@@ -620,13 +652,15 @@ export class BilibiliBrowserSender {
     combined.addEventListener('abort', abort, { once: true });
     let stage = '浏览器启动与网页登录核验';
     try {
-      const url = commentPageUrl(target);
+      const url = commentPageUrl(target, dynamicUrl);
       if (text !== undefined && !this.canPublish())
         throw new PlatformError('公开发布已关闭，尚未提交。', 'rejected');
       const { context, page, account } = await this.open(combined, expectedAccountId);
       const currentSession = this.cookie();
       if (text === undefined) await page.route(ADD + '**', (route) => route.abort());
-      stage = '目标视频页面加载';
+      await page.route('https://api.bilibili.com/x/dynamic/feed/create/**', (r) => r.abort());
+      await page.route('https://api.bilibili.com/x/internal/gaia-gateway/**', (r) => r.abort());
+      stage = '目标作品页面加载';
       await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 25000 });
       stage = '评论区加载';
       await prepareCommentArea(page);

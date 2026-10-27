@@ -69,3 +69,14 @@ it('keeps unknown sends separate from incoming pending and refuses unsafe source
   expect(a[0].threads[0].entries[0].pending).toBe(false);
   expect(commentLink({ ...target, oid: 'not-an-id' })).toBeUndefined();
 });
+
+it('keeps dynamic replies linked to their original dynamic and exact child comment', () => {
+  const t = { oid: '88', type: 11, root: '900', parent: '901' };
+  const url = 'https://t.bilibili.com/1234567890123456789';
+  const a = buildInteractions([], [{ ...outgoing, target: t, resourceUrl: url, receiptId: '902' }]);
+  expect(a[0].video.title).toContain('动态');
+  expect(a[0].video.url).toBe(url);
+  expect(a[0].threads[0].entries[0].url).toContain('comment_root_id=900');
+  expect(a[0].threads[0].entries[0].url).toContain('comment_secondary_id=902');
+  expect(commentLink(t, '902', 'https://evil.test/123')).toBeUndefined();
+});

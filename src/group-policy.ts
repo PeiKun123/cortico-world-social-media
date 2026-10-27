@@ -1,5 +1,9 @@
 export interface GroupConfig {
   activity?: 'quiet' | 'balanced' | 'active';
+  proactiveEnabled?: boolean;
+  proactiveIntervalMinutes?: number;
+  proactiveMaxDaily?: number;
+  proactiveIdleMinutes?: number;
   enabled: boolean;
   allowSend: boolean;
   groups: string;
@@ -9,6 +13,10 @@ export interface GroupConfig {
 }
 export const GROUP_DEFAULTS: GroupConfig = {
   activity: 'balanced',
+  proactiveEnabled: false,
+  proactiveIntervalMinutes: 120,
+  proactiveMaxDaily: 2,
+  proactiveIdleMinutes: 20,
   enabled: false,
   allowSend: false,
   groups: '',

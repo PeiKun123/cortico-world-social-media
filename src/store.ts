@@ -1,4 +1,5 @@
 import type { DynamicPost } from './dynamic-publishing.ts';
+import type { DynamicOffer } from './dynamic-autonomy.ts';
 import { SendArchive } from './archive.ts';
 import type { PublicDynamic } from './platforms/bilibili-dynamics.ts';
 import { RESOURCE_DEFAULTS, type ResourceConfig } from './resources.ts';
@@ -24,6 +25,7 @@ import type {
 
 import type { FocusBinding, FocusWork, FocusCheck, Contact } from './focus.ts';
 interface State {
+  dynamicOffers?: Record<string, DynamicOffer>;
   dynamicPosts?: DynamicPost[];
   dynamics?: PublicDynamic[];
   dynamicReads?: Record<string, number>;
@@ -88,6 +90,13 @@ export class SocialStore {
         )
           throw new Error();
         if (s.roaming !== undefined && !Array.isArray(s.roaming)) throw new Error();
+        if (
+          s.dynamicOffers !== undefined &&
+          (!s.dynamicOffers ||
+            typeof s.dynamicOffers !== 'object' ||
+            Array.isArray(s.dynamicOffers))
+        )
+          throw new Error();
         if (s.dynamicPosts !== undefined && !Array.isArray(s.dynamicPosts)) throw new Error();
         if (s.dynamics !== undefined && !Array.isArray(s.dynamics)) throw new Error();
         if (
@@ -134,6 +143,16 @@ export class SocialStore {
         }
       if (changed) this.save();
     }
+  }
+  dynamicOffer(accountId: string) {
+    return structuredClone(this.state.dynamicOffers?.[accountId]);
+  }
+  saveDynamicOffer(offer: DynamicOffer) {
+    const rows = this.state.dynamicOffers ?? {};
+    delete rows[offer.accountId];
+    rows[offer.accountId] = structuredClone(offer);
+    this.state.dynamicOffers = Object.fromEntries(Object.entries(rows).slice(-20));
+    this.save();
   }
   dynamicPosts(accountId: string) {
     return structuredClone(

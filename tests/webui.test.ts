@@ -1152,3 +1152,112 @@ it('requires a local preview before adopting a changed group binding', async () 
     root.remove();
   }
 });
+
+it('keeps dynamic switches simple and puts cadence controls behind a closed advanced section', async () => {
+  const root = document.createElement('div');
+  document.body.append(root);
+  const c = new AbortController();
+  const state = {
+    config: structuredClone(SOCIALMEDIA_DEFAULTS),
+    platforms: [],
+    inbox: [],
+    outbox: [],
+    pending: 0,
+    unknown: 0,
+  };
+  mountSettings({
+    root,
+    signal: c.signal,
+    interval: () => ({ dispose() {} }),
+    invoke: async () => state,
+  } as unknown as WebUiPanelContext);
+  try {
+    await new Promise((r) => setTimeout(r, 0));
+    const section = root.querySelector('.sm-bili-social')!,
+      advanced = section.querySelector<HTMLDetailsElement>('.sm-bili-social-advanced')!;
+    expect(advanced).not.toBeNull();
+    expect(advanced.open).toBe(false);
+    expect(advanced.textContent).toContain('每天最多主动动态数');
+    expect(advanced.textContent).toContain('主动机会最短间隔');
+    expect(section.textContent).toContain('空闲时主动发动态');
+    const direct = [...section.children]
+      .filter((el) => el !== advanced)
+      .map((el) => el.textContent)
+      .join('');
+    expect(direct).not.toContain('每天最多主动动态数');
+    expect(direct).toContain('允许发布纯文字动态');
+  } finally {
+    c.abort();
+    root.remove();
+  }
+});
+
+it('uses platform cards for groups and keeps open messages intact on polling-only refresh', async () => {
+  const root = document.createElement('div');
+  document.body.append(root);
+  const controller = new AbortController(),
+    intervals: Array<() => void> = [];
+  const state = {
+    config: structuredClone(SOCIALMEDIA_DEFAULTS),
+    platforms: [],
+    inbox: [],
+    outbox: [],
+    groupChat: {
+      enabled: true,
+      allowSend: true,
+      activity: 'active',
+      proactiveEnabled: true,
+      groups: [
+        {
+          id: '123456',
+          name: '测试群',
+          connection: 'online',
+          connected: true,
+          checkedAt: Date.now(),
+          lastMessageAt: 1000,
+          pending: 0,
+          messages: [
+            { id: 'm1', sender: '甲', text: '<script>原话</script>', time: 1000, own: false },
+          ],
+        },
+      ],
+      outbox: [
+        {
+          id: 'r1',
+          groupId: '123456',
+          time: 2000,
+          text: '未提交的原文',
+          status: 'not_submitted',
+          detail: '输入前失败',
+        },
+      ],
+    },
+  };
+  mount({
+    root,
+    signal: controller.signal,
+    invoke: async () => structuredClone(state),
+    interval: (fn: () => void) => {
+      intervals.push(fn);
+      return { dispose() {} };
+    },
+  } as unknown as WebUiPanelContext);
+  try {
+    await new Promise((r) => setTimeout(r, 0));
+    const card = root.querySelector<HTMLDetailsElement>('.sm-group-card')!;
+    expect(card.dataset.platform).toBe('douyin');
+    card.open = true;
+    const message = card.querySelector('.sm-event');
+    expect(root.textContent).toContain('未提交');
+    expect(root.querySelector('script')).toBeNull();
+    state.groupChat.groups[0].checkedAt += 1000;
+    for (const f of intervals) f();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(root.querySelector('.sm-group-card')).toBe(card);
+    expect(card.open).toBe(true);
+    expect(card.querySelector('.sm-event')).toBe(message);
+  } finally {
+    controller.abort();
+    root.remove();
+  }
+});

@@ -569,12 +569,14 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
   const kuaishouLimits = fold('发言额度', 'sm-subsection sm-platform-limits');
   const douyinAdvanced = fold('连接选项', 'sm-subsection sm-platform-advanced');
   const groupSection = fold('群聊监听', 'sm-subsection sm-group-settings');
+  const groupAdvanced = fold('高级设置 · 群聊频率', 'sm-subsection sm-group-advanced');
+  groupSection.append(groupAdvanced);
   const groupStatus = el('p', '尚未开启群聊监听', 'sm-muted');
   groupSection.append(
     groupStatus,
     el(
       'p',
-      '只监听你填写的群。首次保存后检查，固定真实会话；旧消息只作上下文。监听期间需保留后台浏览器，不弹窗口。',
+      '只监听你填写的群。首次保存后检查，固定真实会话；旧消息只作上下文。按间隔在后台读取，默认检查完成即释放浏览器；没有新消息不会反复唤醒。',
       'sm-muted',
     ),
   );
@@ -653,6 +655,10 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
     }
   }
   const biliSocial = fold('动态与主动 @', 'sm-subsection sm-bili-social');
+  const biliSocialAdvanced = fold(
+    '高级设置 · 动态频率与 @',
+    'sm-subsection sm-bili-social-advanced',
+  );
   const dynamicFeedback = el(
     'p',
     '读取与发布分别开启；纯文字动态需先准备草稿，发布与@结果分别核实，用完退出浏览器。',
@@ -757,9 +763,17 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
     const parent =
       path.startsWith('worlds.socialmedia.platforms.bilibili.dynamics.') ||
       /^worlds\.socialmedia\.focus\.(allowMentions|maxDailyMentions)$/.test(path)
-        ? biliSocial
+        ? ['enabled', 'allowPublishing', 'autonomousEnabled', 'allowMentions'].includes(
+            path.split('.').at(-1)!,
+          )
+          ? biliSocial
+          : biliSocialAdvanced
         : path.startsWith('worlds.socialmedia.platforms.douyin.chat.')
-          ? groupSection
+          ? ['enabled', 'allowSend', 'groups', 'activity', 'proactiveEnabled'].includes(
+              path.split('.').at(-1)!,
+            )
+            ? groupSection
+            : groupAdvanced
           : roamPath
             ? ['enabled', 'mode', 'idleMinutes', 'minIntervalMinutes'].includes(roamPath[2])
               ? roamCards.get(roamPath[1])!
@@ -938,6 +952,7 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
     logoutButton,
     credentials,
   );
+  biliSocial.append(biliSocialAdvanced);
   accountSection.append(
     roamCards.get('bilibili')!,
     focusSection,
@@ -1143,11 +1158,32 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
     '抖音特别关注',
     'douyin',
   );
-  const groupRecords = fold('抖音群 · 对话记录', 'sm-platform sm-group-records');
+  const groupRecords = el('section', undefined, 'sm-group-records');
   groupRecords.dataset.platform = 'douyin';
+  const groupHeading = el('div', undefined, 'sm-feed-heading');
+  groupHeading.append(
+    el('h3', '抖音群 · 对话'),
+    el('span', '与评论记录分开保存，按群查看。', 'sm-muted'),
+  );
   const groupRecordBody = el('div');
-  groupRecords.append(groupRecordBody);
+  groupRecords.append(groupHeading, groupRecordBody);
   let groupDigest = '';
+  function groupHealth(g: NonNullable<Snapshot['groupChat']>['groups'][number]) {
+    return (
+      ({
+        disabled: '已关闭',
+        unbound: '尚未绑定',
+        online: '读取正常',
+        retrying: '等待重连',
+        verification: '等待登录或人工验证',
+        stale: '最近读取已过期',
+      }[g.connection] ?? '状态待检查') +
+      (g.checkedAt ? ' · 最近检查 ' + prettyTime(g.checkedAt) : '') +
+      (g.lastMessageAt ? ' · 最新消息 ' + prettyTime(g.lastMessageAt) : ' · 尚未读到消息') +
+      (g.retryAt ? ' · 下次重试 ' + prettyTime(g.retryAt) : '') +
+      (g.error ? ' · ' + g.error : '')
+    );
+  }
   function renderGroups(state: Snapshot) {
     const chat = state.groupChat;
     renderBindingActions(chat?.groups ?? []);
@@ -1160,47 +1196,57 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
             '个群 · ' +
             (chat.allowSend ? '允许接话' : '只读') +
             ' · ' +
-            ({ quiet: '安静', balanced: '均衡', active: '活跃' }[chat.activity] ?? '均衡')
+            ({ quiet: '安静', balanced: '均衡', active: '活跃' }[chat.activity] ?? '均衡') +
+            (chat.proactiveEnabled ? ' · 可主动开启话题' : ' · 有新消息时接话')
           : '请填写并保存群号与群名'));
     groupRecords.hidden = !chat?.groups.length;
-    const digest = JSON.stringify(chat);
+    // A polling timestamp alone must never replace the conversation being read.
+    for (const card of groupRecordBody.querySelectorAll<HTMLElement>('[data-group-id]')) {
+      const g = chat?.groups.find((g) => g.id === card.dataset.groupId),
+        health = card.querySelector('.sm-group-health');
+      if (g && health) health.textContent = groupHealth(g);
+    }
+    const digest = JSON.stringify([
+      chat?.enabled,
+      chat?.allowSend,
+      chat?.activity,
+      chat?.proactiveEnabled,
+      chat?.groups.map(({ checkedAt, ...g }) => g),
+      chat?.outbox,
+    ]);
     if (digest === groupDigest) return;
     groupDigest = digest;
-    const open = new Set(
-      [...groupRecordBody.querySelectorAll<HTMLDetailsElement>('details[open]')].map(
+    const scroller = scrollHost(),
+      oldTop = scroller.scrollTop,
+      top = scroller === document.scrollingElement ? 0 : scroller.getBoundingClientRect().top;
+    const visible = [...root.querySelectorAll<HTMLElement>('[data-anchor]')].find(
+      (n) => n.getClientRects().length && n.getBoundingClientRect().bottom > top,
+    );
+    const anchor =
+      visible && oldTop > 24
+        ? { id: visible.dataset.anchor, offset: visible.getBoundingClientRect().top }
+        : undefined;
+    const opened = new Set(
+      [...groupRecordBody.querySelectorAll<HTMLDetailsElement>('details[open][data-group-id]')].map(
         (d) => d.dataset.groupId,
       ),
     );
     groupRecordBody.replaceChildren();
     for (const g of chat?.groups ?? []) {
-      const card = fold(g.name + ' · ' + g.id, 'sm-subsection');
+      const card = el('details', undefined, 'sm-video sm-group-card');
+      card.dataset.platform = 'douyin';
       card.dataset.groupId = g.id;
-      card.open = open.has(g.id);
-      card.append(
-        el(
-          'p',
-          ({
-            disabled: '已关闭',
-            unbound: '尚未绑定',
-            online: '读取正常',
-            retrying: '等待重连',
-            verification: '等待登录或人工验证',
-            stale: '最近读取已过期',
-          }[g.connection] ?? '状态待检查') +
-            (g.checkedAt ? ' · 最近成功 ' + prettyTime(g.checkedAt) : '') +
-            (g.retryAt ? ' · 下次重试 ' + prettyTime(g.retryAt) : '') +
-            (g.error ? ' · ' + g.error : ''),
-          'sm-muted',
-        ),
-      );
+      card.open = opened.has(g.id);
       const outgoing = chat!.outbox.filter((r) => r.groupId === g.id);
       const combined = [
         ...g.messages.map((m) => ({
           id: m.id,
           text: m.text,
           time: m.time,
+          own: m.own,
           who: m.own ? '我' : m.sender || '群友',
-          note: m.system ? '群提示' : '',
+          note: m.system ? '群提示' : m.own ? '已读回' : '群消息',
+          detail: outgoing.find((r) => r.messageId === m.id)?.detail,
         })),
         ...outgoing
           .filter((r) => !r.messageId || !g.messages.some((m) => m.id === r.messageId))
@@ -1208,24 +1254,85 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
             id: r.id,
             text: r.text,
             time: r.time,
+            own: true,
             who: '我',
             note:
               r.status === 'sent' ? '已受理' : r.status === 'not_submitted' ? '未提交' : '待核实',
+            detail: r.detail,
           })),
       ]
         .filter((m) => m.text)
         .sort((a, b) => b.time - a.time)
         .slice(0, 35);
+      const head = el('summary', undefined, 'sm-video-header');
+      head.dataset.anchor = 'group:' + g.id;
+      const title = el('div');
+      title.append(
+        el(
+          'span',
+          '抖音群 · ' +
+            g.messages.length +
+            ' 条近期记录' +
+            (g.pending ? ' · ' + g.pending + ' 条待接话' : ''),
+          'sm-eyebrow sm-platform-label',
+        ),
+        el('h4', g.name),
+        el('small', '群号 ' + g.id),
+      );
+      const side = el('span', undefined, 'sm-video-side');
+      side.append(
+        el(
+          'span',
+          g.connected ? '读取正常' : '待检查',
+          'sm-tag ' + (g.connected ? 'sm-tag-good' : 'sm-tag-note'),
+        ),
+        el('span', '展开对话', 'sm-open-label'),
+      );
+      head.append(title, side);
+      card.append(head, el('p', groupHealth(g), 'sm-group-health sm-muted'));
+      const thread = el('div', undefined, 'sm-thread sm-group-thread');
       for (const r of combined) {
-        const item = el('article', undefined, 'sm-entry');
-        item.append(
-          el('small', prettyTime(r.time) + ' · ' + r.who + (r.note ? ' · ' + r.note : '')),
-          el('p', r.text),
+        const item = el('article', undefined, 'sm-event sm-' + (r.own ? 'outgoing' : 'incoming'));
+        item.dataset.platform = 'douyin';
+        item.dataset.anchor = 'group-message:' + g.id + ':' + r.id;
+        const meta = el('div', undefined, 'sm-event-meta'),
+          tags = el('div', undefined, 'sm-tags');
+        tags.append(
+          el('span', r.who, 'sm-speaker'),
+          el(
+            'span',
+            r.note,
+            'sm-tag ' + (['未提交', '待核实'].includes(r.note) ? 'sm-tag-note' : ''),
+          ),
         );
-        card.append(item);
+        meta.append(tags, el('time', prettyTime(r.time)));
+        item.append(meta, el('p', r.text, 'sm-body'));
+        if (r.detail) {
+          const detail = fold('发送结果', 'sm-group-receipt');
+          detail.append(el('p', r.detail, 'sm-muted'));
+          item.append(detail);
+        }
+        thread.append(item);
       }
-      if (!combined.length) card.append(el('p', '尚无群对话记录。', 'sm-muted'));
+      if (!combined.length)
+        thread.append(el('p', '尚无群对话记录；先在配置中检查连接。', 'sm-muted'));
+      else if (!g.pending)
+        thread.append(
+          el(
+            'p',
+            '当前没有新的待接话消息。活跃度决定接话意愿，主动开启话题需单独开启。',
+            'sm-muted sm-group-note',
+          ),
+        );
+      card.append(thread);
       groupRecordBody.append(card);
+    }
+    if (anchor) {
+      const restored = [...root.querySelectorAll<HTMLElement>('[data-anchor]')].find(
+        (n) => n.dataset.anchor === anchor.id,
+      );
+      if (restored)
+        scroller.scrollTop = oldTop + restored.getBoundingClientRect().top - anchor.offset;
     }
   }
   const dynamicRecords = fold('B站动态 · 最近读过', 'sm-focus-card');
@@ -1624,7 +1731,13 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
         rejected: '未提交 / 未获准',
       }[r.status];
       item.append(
-        el('small', prettyTime(r.attemptedAt ?? r.createdAt) + ' · ' + label),
+        el(
+          'small',
+          prettyTime(r.attemptedAt ?? r.createdAt) +
+            ' · ' +
+            (r.autonomous ? '自主动态 · ' : '') +
+            label,
+        ),
         el('p', (r.mention ? '@' + r.mention.name + ' ' : '') + r.text),
       );
       if (r.detail) item.append(el('small', r.detail));

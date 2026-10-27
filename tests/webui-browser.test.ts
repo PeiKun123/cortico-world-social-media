@@ -283,4 +283,76 @@ describe.skipIf(!findBrowserExecutable())('timeline in a real browser', () => {
       await page.close();
     }
   });
+  it('renders group chats in the same platform cards without narrow-screen overflow or reading jumps', async () => {
+    const page = await fixture(420);
+    try {
+      await page.evaluate(async () => {
+        const w = window as any;
+        w.testState.groupChat = {
+          enabled: true,
+          allowSend: true,
+          activity: 'active',
+          groups: [
+            {
+              id: '123456',
+              name: '示例群聊',
+              connection: 'online',
+              connected: true,
+              checkedAt: Date.now(),
+              lastMessageAt: 1000,
+              pending: 0,
+              messages: Array.from({ length: 20 }, (_, i) => ({
+                id: 'm' + i,
+                text: '一段可以公开讨论的群聊原话。'.repeat(8),
+                time: 1000 + i,
+                sender: '群友' + i,
+                own: i % 3 === 0,
+              })),
+            },
+          ],
+          outbox: [],
+        };
+        for (const f of w.refreshers) await f();
+      });
+      const card = page.locator('.sm-group-card');
+      await card.waitFor({ state: 'attached' });
+      await card.locator('summary').first().click();
+      const entry = card.locator('.sm-event').nth(8);
+      await entry.scrollIntoViewIfNeeded();
+      const before = await entry.boundingBox();
+      await page.evaluate(async () => {
+        const w = window as any;
+        w.savedGroup = document.querySelector('.sm-group-card');
+        w.testState.groupChat.groups[0].checkedAt += 1000;
+        for (const f of w.refreshers) await f();
+      });
+      expect(
+        await page.evaluate(
+          () => (window as any).savedGroup === document.querySelector('.sm-group-card'),
+        ),
+      ).toBe(true);
+      await page.evaluate(async () => {
+        const w = window as any;
+        w.testState.groupChat.groups[0].messages.push({
+          id: 'new',
+          text: '新增原话',
+          time: 9999,
+          sender: '另一位群友',
+          own: false,
+        });
+        for (const f of w.refreshers) await f();
+      });
+      const after = await card.locator('[data-anchor="group-message:123456:m11"]').boundingBox();
+      expect(Math.abs(after!.y - before!.y)).toBeLessThan(3);
+      expect(await card.getAttribute('open')).not.toBeNull();
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
+        true,
+      );
+      expect(
+        (await card.evaluate((n) => getComputedStyle(n).getPropertyValue('--sm-accent'))).trim(),
+      ).toBeTruthy();
+    } finally {
+      await page.close();
+    }
+  });
 });

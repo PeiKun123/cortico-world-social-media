@@ -52,8 +52,23 @@ function videoLink(t: CommentTarget) {
     ? 'https://www.bilibili.com/video/av' + t.oid + '/'
     : undefined;
 }
-export function commentLink(t: CommentTarget, receiptId?: string) {
-  const base = videoLink(t);
+function dynamicPage(raw?: string) {
+  try {
+    const u = new URL(raw ?? '');
+    if (u.username || u.password) return;
+    const ok =
+      (u.origin === 'https://t.bilibili.com' && /^\/\d+\/?$/.test(u.pathname)) ||
+      (u.origin === 'https://www.bilibili.com' && /^\/opus\/\d+\/?$/.test(u.pathname));
+    if (!ok) return;
+    u.search = '';
+    u.hash = '';
+    return u.href;
+  } catch {
+    return;
+  }
+}
+export function commentLink(t: CommentTarget, receiptId?: string, resourceUrl?: string) {
+  const base = videoLink(t) || ([11, 17].includes(t.type) ? dynamicPage(resourceUrl) : undefined);
   if (!base) return;
   if (t.type === 2 || t.type === 3) return base; // No unverified deep-link parameters for Douyin comments.
   const id = receiptId ?? t.parent;
@@ -75,7 +90,9 @@ export function buildInteractions(
   const groups = new Map<string, InteractionGroup>();
   const add = (platform: string, e: InteractionEntry, sourceUrl?: string) => {
     const key = [platform, e.target.type, e.target.oid].join(':'),
-      v = videos.find((v) => v.aid === e.target.oid) || e.record?.preparation?.video;
+      v = [11, 17].includes(e.target.type)
+        ? undefined
+        : videos.find((v) => v.aid === e.target.oid) || e.record?.preparation?.video;
     let group = groups.get(key);
     if (!group) {
       group = {
@@ -85,8 +102,16 @@ export function buildInteractions(
           aid: e.target.oid,
           title:
             v?.title ||
-            (e.target.type === 1 ? '视频 av' + e.target.oid : '平台评论 ' + e.target.oid),
-          url: safeBiliLink(v?.url) || videoLink(e.target) || safeBiliLink(sourceUrl),
+            (e.target.type === 1
+              ? '视频 av' + e.target.oid
+              : [11, 17].includes(e.target.type)
+                ? 'B站动态 ' + e.target.oid
+                : '平台评论 ' + e.target.oid),
+          url:
+            safeBiliLink(v?.url) ||
+            videoLink(e.target) ||
+            dynamicPage(e.record?.resourceUrl ?? sourceUrl) ||
+            safeBiliLink(sourceUrl),
           author: v?.author,
         },
         latestAt: e.at,
@@ -127,7 +152,7 @@ export function buildInteractions(
         text: i.text,
         author: i.author,
         target: i.target,
-        url: commentLink(i.target) || safeBiliLink(i.url),
+        url: commentLink(i.target, undefined, i.url) || safeBiliLink(i.url),
         inbox: i,
       },
       i.url,
@@ -158,7 +183,7 @@ export function buildInteractions(
       text: r.mention ? '@' + r.mention.name + ' ' + r.text : r.text,
       author: '我',
       target: r.target,
-      url: commentLink(r.target, r.receiptId),
+      url: commentLink(r.target, r.receiptId, r.resourceUrl),
       quote,
       record: r,
     });

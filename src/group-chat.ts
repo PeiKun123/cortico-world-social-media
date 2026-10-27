@@ -65,6 +65,7 @@ interface Notice {
   message: GroupMessage;
 }
 interface State {
+  proactive?: Array<{ key: string; at: number }>;
   version: 1;
   archivedBindings?: Array<{ binding: Binding; pending: Notice[]; archivedAt: number }>;
   notices: Notice[];
@@ -85,6 +86,7 @@ export class GroupChats {
       read: (g: GroupTarget, signal?: AbortSignal) => Promise<GroupView>;
       send: (g: GroupTarget, draft: string, signal?: AbortSignal) => Promise<GroupReceipt>;
     },
+    private timezone?: string,
   ) {
     this.state = {
       version: 1,
@@ -197,6 +199,7 @@ export class GroupChats {
       platform: 'douyin',
       enabled: this.cfg().enabled,
       allowSend: this.cfg().allowSend,
+      proactiveEnabled: !!this.cfg().proactiveEnabled,
       activity: this.cfg().activity ?? 'balanced',
       groups: targets.map((t) => {
         const b = this.state.bindings.find((b) => b.id === t.id && b.name === t.name);
@@ -220,6 +223,11 @@ export class GroupChats {
           accountId: b?.accountId,
           conversationId: b?.conversationId,
           checkedAt: b?.checkedAt,
+          lastMessageAt: b?.messages.at(-1)?.time,
+          pending: this.state.notices.filter((n) => n.groupId === t.id).length,
+          lastProactiveAt: this.state.proactive
+            ?.filter((n) => n.key === [t.id, b?.accountId, b?.conversationId].join(':'))
+            .at(-1)?.at,
           error: b?.error,
           messages: structuredClone(b?.messages.slice(-30) ?? []),
         };
@@ -325,6 +333,60 @@ export class GroupChats {
         messages,
       };
     });
+  }
+  offerProactive() {
+    const c = { ...GROUP_DEFAULTS, ...this.cfg() },
+      now = Date.now();
+    if (!c.enabled || !c.allowSend || !c.proactiveEnabled || this.state.notices.length) return;
+    const interval = Math.max(30, c.proactiveIntervalMinutes ?? 120) * 60000;
+    const dayOf = (at: number) =>
+      new Date(at).toLocaleDateString(
+        'sv-SE',
+        this.timezone ? { timeZone: this.timezone } : undefined,
+      );
+    const day = dayOf(now);
+    const hour = this.timezone
+      ? Number(
+          new Intl.DateTimeFormat('en-GB', {
+            timeZone: this.timezone,
+            hour: '2-digit',
+            hourCycle: 'h23',
+          }).format(now),
+        )
+      : new Date(now).getHours();
+    if (hour < 9 || hour >= 23) return;
+    for (const t of parseGroupList(c.groups)) {
+      const b = this.state.bindings.find((b) => b.id === t.id && b.name === t.name);
+      if (!b || b.error || now - b.checkedAt > Math.max(180, c.intervalSec * 3) * 1000) continue;
+      const key = [b.id, b.accountId, b.conversationId].join(':');
+      const offers = (this.state.proactive ?? []).filter((o) => o.key === key);
+      if (offers.filter((o) => dayOf(o.at) === day).length >= (c.proactiveMaxDaily ?? 2)) continue;
+      const lastSend =
+        this.state.outbox
+          .filter(
+            (r) =>
+              r.groupId === b.id &&
+              r.accountId === b.accountId &&
+              r.conversationId === b.conversationId &&
+              r.status !== 'not_submitted',
+          )
+          .at(-1)?.time ?? 0;
+      if (now - Math.max(b.messages.at(-1)?.time ?? 0, lastSend, offers.at(-1)?.at ?? 0) < interval)
+        continue;
+      (this.state.proactive ??= []).push({ key, at: now });
+      this.state.proactive = this.state.proactive
+        .filter((o) => now - o.at < 2 * 86400000)
+        .slice(-200);
+      this.save();
+      return {
+        platform: 'douyin',
+        groupId: b.id,
+        name: b.name,
+        expiresAt: now + 15 * 60000,
+        context: this.history(b.id).messages.slice(-4),
+        note: '旧记录仅作背景；不继续已经过期的问答。可以发起适合本群的新话题，也可以放弃。',
+      };
+    }
   }
   async previewBinding(id: string, signal?: AbortSignal) {
     const t = this.allowed(id),

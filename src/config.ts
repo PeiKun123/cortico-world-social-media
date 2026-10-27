@@ -6,6 +6,12 @@ export interface SocialPlatformConfig {
   dynamics?: {
     enabled: boolean;
     maxDailyReads?: number;
+    autonomousEnabled?: boolean;
+    autoMaxDaily?: number;
+    autoMinIntervalMinutes?: number;
+    autoIdleMinutes?: number;
+    autoStartHour?: number;
+    autoEndHour?: number;
     allowPublishing?: boolean;
     maxDailyPosts?: number;
     minIntervalSec?: number;
@@ -184,6 +190,12 @@ export const SOCIALMEDIA_DEFAULTS: SocialMediaConfigSection = {
       dynamics: {
         enabled: false,
         maxDailyReads: 20,
+        autonomousEnabled: false,
+        autoMaxDaily: 1,
+        autoMinIntervalMinutes: 360,
+        autoIdleMinutes: 20,
+        autoStartHour: 9,
+        autoEndHour: 23,
         allowPublishing: false,
         maxDailyPosts: 3,
         minIntervalSec: 300,
@@ -556,7 +568,8 @@ export const SOCIALMEDIA_CONFIG_GROUP: ConfigGroup = {
         title: '每天最多发布动态数',
         minimum: 1,
         maximum: 20,
-        description: '默认3条；提交尝试计入预算，重启不清零。与视频评论配额分开。',
+        description:
+          '默认3条；已受理和结果不明占额度，明确未提交的失败不消耗发布份额。重启不清零；与评论配额分开。',
         'x-hot': true,
       },
       'worlds.socialmedia.platforms.bilibili.dynamics.minIntervalSec': {
@@ -564,6 +577,53 @@ export const SOCIALMEDIA_CONFIG_GROUP: ConfigGroup = {
         title: '动态发布最短间隔（秒）',
         minimum: 60,
         maximum: 86400,
+        'x-hot': true,
+      },
+      'worlds.socialmedia.platforms.bilibili.dynamics.autonomousEnabled': {
+        type: 'boolean',
+        title: '空闲时主动发动态',
+        description:
+          '需同时允许发布动态。安静空闲时给Bot一次可放弃的创作机会，不照搬私聊和其他World的私密内容；不会强制发文。',
+        'x-hot': true,
+      },
+      'worlds.socialmedia.platforms.bilibili.dynamics.autoMaxDaily': {
+        type: 'integer',
+        title: '每天最多主动动态数',
+        minimum: 1,
+        maximum: 20,
+        description: '默认1条，仍受每日动态总量限制。',
+        'x-hot': true,
+      },
+      'worlds.socialmedia.platforms.bilibili.dynamics.autoMinIntervalMinutes': {
+        type: 'integer',
+        title: '主动机会最短间隔（分钟）',
+        minimum: 30,
+        maximum: 1440,
+        description: '默认360分钟；选择不发也会等待，避免反复打扰和唤醒。',
+        'x-hot': true,
+      },
+      'worlds.socialmedia.platforms.bilibili.dynamics.autoIdleMinutes': {
+        type: 'integer',
+        title: '安静空闲多久再考虑（分钟）',
+        minimum: 1,
+        maximum: 240,
+        description: '默认20分钟；有人聊天、有待回应评论或正在闲逛时先处理原来的事。',
+        'x-hot': true,
+      },
+      'worlds.socialmedia.platforms.bilibili.dynamics.autoStartHour': {
+        type: 'integer',
+        title: '主动动态开始时段（小时）',
+        minimum: 0,
+        maximum: 23,
+        description: '按Bot时区，默认9时；开始与结束相同表示全天。',
+        'x-hot': true,
+      },
+      'worlds.socialmedia.platforms.bilibili.dynamics.autoEndHour': {
+        type: 'integer',
+        title: '主动动态结束时段（小时）',
+        minimum: 0,
+        maximum: 23,
+        description: '按Bot时区，默认23时；支持跨午夜。',
         'x-hot': true,
       },
       'worlds.socialmedia.focus.allowMentions': {
@@ -764,6 +824,24 @@ for (const [key, prop] of Object.entries({
     title: '群聊活跃度',
     enum: ['quiet', 'balanced', 'active'] as string[],
     description: '活跃档更愿意接普通话题和提问，不要求@；仍会判断是否适合接话，不强行刷屏。',
+  },
+  proactiveEnabled: {
+    type: 'boolean',
+    title: '空闲时主动开启群话题',
+    description: '默认关闭；9至23点、安静空闲且没有待办时给一次可放弃的机会，不强制发送。',
+  },
+  proactiveIntervalMinutes: {
+    type: 'integer',
+    title: '主动群话题最小间隔（分钟）',
+    minimum: 30,
+    maximum: 1440,
+  },
+  proactiveMaxDaily: { type: 'integer', title: '每群每日主动话题机会', minimum: 0, maximum: 10 },
+  proactiveIdleMinutes: {
+    type: 'integer',
+    title: '主动群话题前安静空闲（分钟）',
+    minimum: 5,
+    maximum: 180,
   },
   allowSend: {
     type: 'boolean',

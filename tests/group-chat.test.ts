@@ -234,3 +234,43 @@ it('bounds a busy group batch while acknowledging the older fragments as context
   g.deliveredBatch('123456', batch.ids);
   expect(await g.poll()).toEqual([]);
 });
+
+it('persists optional group initiative opportunities, respects silence, limits and connection health', async () => {
+  vi.useFakeTimers();
+  try {
+    vi.setSystemTime(new Date(2026, 9, 27, 12, 0));
+    const x = setup(),
+      g = x.create();
+    Object.assign(x.cfg, {
+      proactiveEnabled: true,
+      proactiveMaxDaily: 1,
+      proactiveIntervalMinutes: 30,
+    });
+    await g.check('123456');
+    expect(g.offerProactive()).toMatchObject({ groupId: '123456' });
+    expect(x.create().offerProactive()).toBeUndefined();
+    vi.advanceTimersByTime(3600000);
+    expect(x.create().offerProactive()).toBeUndefined();
+    vi.setSystemTime(new Date(2026, 9, 28, 12, 0));
+    await g.poll();
+    expect(g.offerProactive()).toMatchObject({ groupId: '123456' });
+  } finally {
+    vi.useRealTimers();
+  }
+});
+it('does not offer a group topic while a new message is awaiting response or reading is stale', async () => {
+  const x = setup(),
+    g = x.create();
+  Object.assign(x.cfg, { proactiveEnabled: true });
+  await g.check('123456');
+  x.view.messages.push({
+    id: 'fresh',
+    senderId: 'u',
+    sender: '乙',
+    text: '你好呀',
+    own: false,
+    time: Date.now(),
+  });
+  await g.poll();
+  expect(g.offerProactive()).toBeUndefined();
+});
