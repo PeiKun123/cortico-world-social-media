@@ -123,7 +123,12 @@ export interface SocialMediaConfigSection {
   platforms: Record<string, SocialPlatformConfig>;
   media: { ffmpegFile: string; maxFrames: number } & Partial<ResourceConfig>;
   browser: { executableFile: string; background: boolean };
-  douyinBrowser?: { executableFile: string; background: boolean; releaseAfterTask?: boolean };
+  douyinBrowser?: {
+    executableFile: string;
+    background: boolean;
+    releaseAfterTask?: boolean;
+    compatibilityWindow?: boolean;
+  };
   kuaishouBrowser?: { executableFile: string; background: boolean };
 }
 export const SOCIALMEDIA_SECRET = 'SOCIALMEDIA_BILIBILI_COOKIE';
@@ -141,7 +146,7 @@ export const SOCIALMEDIA_DEFAULTS: SocialMediaConfigSection = {
     replyExistingComments: false,
     autoReplyIntervalMinutes: 2,
   },
-  roaming: { enabled: false, ...ROAMING_PRESETS.balanced },
+  roaming: { enabled: false, ...ROAMING_PRESETS.active },
   platforms: {
     kuaishou: {
       enabled: false,
@@ -213,7 +218,12 @@ export const SOCIALMEDIA_DEFAULTS: SocialMediaConfigSection = {
   },
   media: { ffmpegFile: 'ffmpeg', maxFrames: 2, ...RESOURCE_DEFAULTS },
   browser: { executableFile: '', background: true },
-  douyinBrowser: { executableFile: '', background: true, releaseAfterTask: true },
+  douyinBrowser: {
+    executableFile: '',
+    background: true,
+    releaseAfterTask: true,
+    compatibilityWindow: false,
+  },
   kuaishouBrowser: { executableFile: '', background: true },
 };
 export const SOCIALMEDIA_CONFIG_GROUP: ConfigGroup = {
@@ -515,11 +525,18 @@ export const SOCIALMEDIA_CONFIG_GROUP: ConfigGroup = {
           '默认开启，读取或回复结束即退出后台进程，保留登录；群聊按原间隔重新启动检查。关闭后可减少冷启动等待，但会多占内存。',
         'x-hot': true,
       },
+      'worlds.socialmedia.douyinBrowser.compatibilityWindow': {
+        type: 'boolean',
+        title: '兼容窗口模式（Windows）',
+        description:
+          '默认关闭。无窗口模式无法正常加载时可主动开启，并保留后台运行开关。使用普通Edge渲染，独立窗口放到屏幕外而非当前工作区；会出现独立Edge任务栏图标，它不是完全隐藏，资源占用仍是完整浏览器。不会自动切换、代做验证或改变登录资料。非Windows不支持。',
+        'x-hot': true,
+      },
       'worlds.socialmedia.douyinBrowser.background': {
         type: 'boolean',
         title: '抖音浏览器后台运行',
         description:
-          '默认无窗口后台运行，保留登录态和网页交互；扫码或人工验证时从配置主动打开独立Edge。不会自动弹窗回退。',
+          '默认无窗口后台运行，保留登录态和网页交互；官网可能单独要求后台会话人工验证，登录正常不等于推荐流可用。可在连接检查中测试推荐流；需验证时主动打开独立Edge。不会自动弹窗回退。',
         'x-hot': true,
       },
       'worlds.socialmedia.platforms.bilibili.enabled': {

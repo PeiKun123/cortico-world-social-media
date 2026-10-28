@@ -210,6 +210,7 @@
   letter-spacing: 0.04em;
 }
 .socialmedia-desk .sm-video-side {
+  margin-left: auto;
   display: flex;
   flex-direction: column;
   align-items: flex-end;
@@ -225,22 +226,16 @@
   font-size: 12px;
   color: var(--sm-accent);
 }
-.socialmedia-desk .sm-open-label:after {
-  content: ' ＋';
-  display: inline-block;
-}
+
 .socialmedia-desk .sm-video[open] > .sm-video-header {
   border-bottom: 1px solid var(--sm-line);
   border-bottom-left-radius: 0;
   border-bottom-right-radius: 0;
 }
 .socialmedia-desk .sm-video[open] > .sm-video-header .sm-open-label {
-  font-size: 0;
+  display: none;
 }
-.socialmedia-desk .sm-video[open] > .sm-video-header .sm-open-label:after {
-  content: '收起对话 −';
-  font-size: 12px;
-}
+
 .socialmedia-desk a {
   color: var(--sm-accent);
   text-decoration: none;
@@ -402,14 +397,7 @@
   font-weight: 600;
   list-style: none;
 }
-.socialmedia-desk .sm-config-section > summary:after {
-  content: ' ＋';
-  color: var(--sm-accent);
-  float: right;
-}
-.socialmedia-desk .sm-config-section[open] > summary:after {
-  content: ' −';
-}
+
 .socialmedia-desk .sm-config-section[open] > summary {
   margin-bottom: 16px;
 }
@@ -548,6 +536,7 @@
     flex-direction: column;
   }
   .socialmedia-desk .sm-video-side {
+  margin-left: auto;
     flex-direction: row;
     width: 100%;
     justify-content: space-between;
@@ -599,13 +588,7 @@
   font-size: 14px;
   color: var(--sm-accent);
 }
-.socialmedia-desk .sm-focus-card > summary:after {
-  content: '＋';
-  float: right;
-}
-.socialmedia-desk .sm-focus-card[open] > summary:after {
-  content: '−';
-}
+
 .socialmedia-desk .sm-focus-body {
   padding: 0 22px 20px;
 }
@@ -668,9 +651,7 @@
 .socialmedia-desk .sm-platform-card,
 .socialmedia-desk .sm-video,
 .socialmedia-desk .sm-focus-card {
-  background:
-    linear-gradient(110deg, color-mix(in srgb, var(--sm-accent) 13%, transparent), transparent 72%),
-    var(--sm-surface);
+  background: color-mix(in srgb, var(--sm-accent) 5%, var(--sm-surface));
   border-color: color-mix(in srgb, var(--sm-accent) 36%, var(--sm-line));
 }
 .socialmedia-desk .sm-platform-card {
@@ -710,13 +691,7 @@
   font-size: 13px;
   font-weight: 550;
 }
-.socialmedia-desk .sm-subsection > summary:after {
-  content: '＋';
-  color: color-mix(in srgb, var(--sm-accent) 45%, currentColor);
-}
-.socialmedia-desk .sm-subsection[open] > summary:after {
-  content: '−';
-}
+
 .socialmedia-desk .sm-subsection > button {
   margin: 8px 0 16px;
 }
@@ -985,5 +960,99 @@
   }
   .socialmedia-desk .sm-group-health {
     padding: 12px 16px;
+  }
+}
+
+/* Shared disclosures for conversations, dynamics and settings. */
+.socialmedia-desk details > summary {
+  list-style: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.socialmedia-desk details > summary::after {
+  content: '';
+  display: block;
+  flex: 0 0 7px;
+  width: 7px;
+  height: 7px;
+  border-right: 1.5px solid var(--sm-accent);
+  border-bottom: 1.5px solid var(--sm-accent);
+  transform: rotate(-45deg);
+  margin: 0 3px 0 0;
+  transition: transform 0.16s ease;
+}
+.socialmedia-desk details[open] > summary::after {
+  transform: rotate(45deg);
+}
+.socialmedia-desk .sm-focus-card > summary {
+  color: var(--sm-accent);
+  font-weight: 600;
+}
+.socialmedia-desk .sm-focus-card[data-platform] {
+  border-left: 3px solid var(--sm-accent);
+}
+.socialmedia-desk .sm-group-records > .sm-focus-body {
+  padding-top: 4px;
+}
+.socialmedia-desk .sm-group-records .sm-group-card {
+  border-radius: 12px;
+  margin-bottom: 12px;
+}
+.socialmedia-desk .sm-group-records .sm-group-card:last-child {
+  margin-bottom: 0;
+}
+.socialmedia-desk .sm-readiness dl {
+  display: grid;
+  grid-template-columns: 96px minmax(0, 1fr);
+  gap: 0;
+  margin: 0;
+}
+.socialmedia-desk .sm-readiness dt,
+.socialmedia-desk .sm-readiness dd {
+  margin: 0;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--sm-line);
+  font-size: 12px;
+}
+.socialmedia-desk .sm-readiness dt {
+  color: var(--sm-accent);
+  font-weight: 550;
+}
+.socialmedia-desk .sm-readiness dd small {
+  display: block;
+  margin-top: 3px;
+  opacity: 0.65;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+.socialmedia-desk .sm-evidence-value {
+  font-weight: 550;
+}
+.socialmedia-desk .sm-readiness [data-state='confirmed'] .sm-evidence-value {
+  color: var(--sm-good);
+}
+.socialmedia-desk .sm-readiness [data-state='attention'] .sm-evidence-value {
+  color: #e6ad9a;
+}
+.socialmedia-desk .sm-readiness > p,
+.socialmedia-desk .sm-setup-guide li {
+  font-size: 12px;
+  line-height: 1.85;
+}
+.socialmedia-desk .sm-setup-guide ol {
+  padding-left: 20px;
+  margin: 0 0 12px;
+}
+.socialmedia-desk .sm-setup-guide li + li {
+  margin-top: 8px;
+}
+@media (max-width: 520px) {
+  .socialmedia-desk .sm-readiness dl {
+    grid-template-columns: 82px minmax(0, 1fr);
+  }
+  .socialmedia-desk .sm-fold-status {
+    max-width: 65%;
   }
 }

@@ -162,6 +162,7 @@ export class DouyinPlatform implements SocialPlatform {
     private cacheMB: () => number = () => 128,
     private groupListening: () => boolean = () => false,
     private releaseAfterTask: () => boolean = () => true,
+    private compatibilityWindow: () => boolean = () => false,
   ) {}
   status() {
     return {
@@ -177,6 +178,12 @@ export class DouyinPlatform implements SocialPlatform {
       runtimeNote:
         '后台任务默认结束即退出浏览器，登录资料保留；群聊按间隔重新启动读取。可关闭立即释放以保留连接。登录窗口仅由配置页主动打开。running=false不是启动失败。',
       loginOpen: this.loginOpen,
+      browserMode:
+        this.loginOpen || !this.background()
+          ? 'visible'
+          : this.compatibilityWindow()
+            ? 'compatible'
+            : 'windowless',
       detail: this.detail,
       capabilities: {
         read: true,
@@ -205,18 +212,32 @@ export class DouyinPlatform implements SocialPlatform {
     const executablePath = edgeExecutable(this.executable());
     if (!executablePath)
       throw new PlatformError('未找到Edge或Chrome，请在抖音浏览器设置填写程序路径。', 'rejected');
+    const compatible = !visible && this.background() && this.compatibilityWindow();
+    if (compatible && process.platform !== 'win32')
+      throw new PlatformError(
+        '兼容窗口模式目前只支持Windows；请关闭兼容模式，使用无窗口后台或普通窗口。',
+        'rejected',
+      );
     const context = await chromium.launchPersistentContext(this.profileDir, {
       executablePath,
-      headless: !visible && this.background(),
+      headless: !visible && this.background() && !compatible,
       chromiumSandbox: true,
       ignoreDefaultArgs: ['--unsafely-disable-devtools-self-xss-warnings'],
       viewport: { width: 1280, height: 900 },
       timeout: 20000,
       args: [
         ...browserCacheArgs(this.cacheMB()),
+        ...(compatible
+          ? ['--window-position=-32000,-32000', '--window-size=1280,900']
+          : process.platform === 'win32'
+            ? ['--window-position=100,100']
+            : []),
         '--mute-audio',
         '--disable-notifications',
         '--autoplay-policy=no-user-gesture-required',
+        '--disable-background-timer-throttling',
+        '--disable-renderer-backgrounding',
+        '--disable-backgrounding-occluded-windows',
       ],
     });
 
@@ -232,6 +253,7 @@ export class DouyinPlatform implements SocialPlatform {
       if (this.context === context) {
         this.context = undefined;
         this.chatPage = undefined;
+        this.feedUrl = undefined;
         this.groupIdentityCache = undefined;
         this.loginOpen = false;
       }
@@ -354,6 +376,14 @@ export class DouyinPlatform implements SocialPlatform {
       root: root || '0',
     });
   }
+  private async checkPageBlock(page: Page) {
+    const title = (await page.title()).trim();
+    if (/^(?:验证码中间页|安全验证|验证中心)(?:$|\s|[-—|])/.test(title))
+      throw new PlatformError(
+        '抖音官网正在要求人工验证，后台不能代为完成。请在配置页打开抖音登录窗口，完成官网验证后点击“完成抖音登录”，再用“检查抖音推荐流”重试；这不代表账号已掉线，也不会自动切换有窗口模式。',
+        'auth',
+      );
+  }
   private async settle(
     page: Page,
     data: Capture,
@@ -362,6 +392,7 @@ export class DouyinPlatform implements SocialPlatform {
   ) {
     const until = Date.now() + ms;
     while (!(await ready()) && Date.now() < until && !page.isClosed()) {
+      await this.checkPageBlock(page);
       await page.waitForTimeout(150);
       await Promise.allSettled([...data.pending]);
     }
@@ -394,7 +425,7 @@ export class DouyinPlatform implements SocialPlatform {
       if (kind === 'chat') {
         if (!this.chatPage || this.chatPage.isClosed()) this.chatPage = await ctx.newPage();
         p = this.chatPage;
-        await p.bringToFront();
+        if (!this.background()) await p.bringToFront();
       } else {
         p = kind === 'send' ? await ctx.newPage() : ctx.pages()[0] || (await ctx.newPage());
         await this.guardCommentPage(p);
@@ -424,6 +455,7 @@ export class DouyinPlatform implements SocialPlatform {
         }
         if (new URL(p.url()).origin !== ORIGIN)
           throw new PlatformError('官网跳转到了未支持的地址，停止本次操作。', 'rejected');
+        await this.checkPageBlock(p);
         const result = await action(p, data);
         combined.throwIfAborted();
         return result;
@@ -543,7 +575,7 @@ export class DouyinPlatform implements SocialPlatform {
       return identity.self;
     } finally {
       await check.close().catch(() => {});
-      await page.bringToFront();
+      if (!this.background()) await page.bringToFront();
     }
   }
 
@@ -757,7 +789,7 @@ export class DouyinPlatform implements SocialPlatform {
   }
   async nextVideo(seen: string[] = [], signal?: AbortSignal): Promise<Video> {
     return this.visit(
-      this.feedUrl ?? ORIGIN + '/?recommend=1',
+      this.feedUrl ?? ORIGIN + '/jingxuan',
       async (p, data) => {
         await this.dismiss(p);
         const exclude = new Set([...seen, ...(this.lastFeedId ? [this.lastFeedId] : [])]);
@@ -1235,7 +1267,7 @@ export class DouyinPlatform implements SocialPlatform {
         );
         this.detail = rows.length
           ? '已读取官网提供的评论；未登录时数量可能受限。'
-          : '评论正文暂未取得，可能需要登录或完成验证。';
+          : '评论正文尚未读取成功；此结果不能证明登录失效。可稍后重读，或在配置页检查对应作品页面。';
         return {
           ...(rows.length
             ? {}

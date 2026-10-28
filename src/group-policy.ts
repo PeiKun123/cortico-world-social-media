@@ -12,11 +12,11 @@ export interface GroupConfig {
   maxDailyMessages: number;
 }
 export const GROUP_DEFAULTS: GroupConfig = {
-  activity: 'balanced',
+  activity: 'active',
   proactiveEnabled: false,
-  proactiveIntervalMinutes: 120,
-  proactiveMaxDaily: 2,
-  proactiveIdleMinutes: 20,
+  proactiveIntervalMinutes: 60,
+  proactiveMaxDaily: 4,
+  proactiveIdleMinutes: 5,
   enabled: false,
   allowSend: false,
   groups: '',

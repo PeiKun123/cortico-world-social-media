@@ -1,6 +1,6 @@
 {
   "name": "cortico-world-social-media",
-  "version": "0.6.3",
+  "version": "0.6.4",
   "type": "module",
   "description": "社交视窗：B站视频、动态读写与评论，实验接入抖音、快手；按作品归档互动，分平台设置特别关注与闲逛，B站可选主动@关注、抖音可监听指定群。快手暂不支持图文发评与群聊。沿用现有模型。",
   "license": "MIT",

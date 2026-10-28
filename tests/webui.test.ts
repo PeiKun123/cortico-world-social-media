@@ -2,7 +2,7 @@ import { focusStatus, focusView, type FocusSnapshot } from '../src/webui/focus.t
 import { SOCIALMEDIA_DEFAULTS } from '../src/config.ts';
 // @vitest-environment jsdom
 import { describe, expect, it } from 'vitest';
-import { mount, mountSettings } from '../src/webui/client.ts';
+import { connectionEvidence, mount, mountSettings } from '../src/webui/client.ts';
 import type { WebUiPanelContext } from 'cortico/web/shared/client-panel.ts';
 describe('operator desk', () => {
   it('renders untrusted text literally, preserves scroll, and never sends cookies into a model', async () => {
@@ -606,7 +606,7 @@ it('checks the saved Douyin owner immediately without asking to post', async () 
   const input = root.querySelector<HTMLInputElement>(
     '[aria-label="抖音主人账号（抖音号或主页链接）"]',
   )!;
-  input.value = '1809102273';
+  input.value = '1234567890';
   input.dispatchEvent(new Event('input'));
   [...root.querySelectorAll('button')].find((b) => b.textContent === '保存抖音设置')!.click();
   await new Promise((r) => setTimeout(r, 0));
@@ -1260,4 +1260,88 @@ it('uses platform cards for groups and keeps open messages intact on polling-onl
     controller.abort();
     root.remove();
   }
+});
+
+it('separates actual replies, public visibility and native mentions from login and other accounts', () => {
+  const state = {
+    pending: 0,
+    unknown: 0,
+    credentialSaved: true,
+    inbox: [],
+    platforms: [{ id: 'bilibili', enabled: true, account: { id: '42', name: '本号' } }],
+    outbox: [
+      {
+        platform: 'bilibili',
+        accountId: '99',
+        status: 'sent',
+        receiptId: '1',
+        target: { root: '7' },
+        visibility: { status: 'public' },
+        createdAt: '2026-10-28T00:00:00Z',
+      },
+      {
+        platform: 'bilibili',
+        accountId: '42',
+        status: 'unknown',
+        target: { root: '7' },
+        createdAt: '2026-10-28T00:00:00Z',
+      },
+      {
+        platform: 'bilibili',
+        accountId: '42',
+        status: 'sent',
+        receiptId: '2',
+        target: { root: '0' },
+        createdAt: '2026-10-28T00:00:00Z',
+      },
+    ],
+    dynamics: {
+      posts: [
+        {
+          accountId: '42',
+          status: 'sent',
+          mention: { id: '8', name: '主人' },
+          dynamicId: '3',
+          createdAt: '2026-10-28T00:00:00Z',
+        },
+      ],
+    },
+  } as any;
+  const rows = connectionEvidence(state, 'bilibili');
+  expect(rows.find((r) => r.key === 'reply')?.state).toBe('pending');
+  expect(rows.find((r) => r.key === 'visibility')?.state).toBe('pending');
+  expect(rows.find((r) => r.key === 'comment')?.value).toBe('平台已受理');
+  expect(rows.find((r) => r.key === 'mention')?.value).toBe('已提交含@内容');
+  expect(rows.find((r) => r.key === 'mention')?.detail).toContain('通知');
+});
+it('records a comment read check without treating an empty list as proven comment reading', () => {
+  const state = {
+    pending: 0,
+    unknown: 0,
+    credentialSaved: false,
+    platforms: [{ id: 'douyin', enabled: true, account: { id: 'dy', name: '本号' } }],
+    inbox: [],
+    outbox: [],
+  } as any;
+  expect(
+    connectionEvidence(state, 'douyin', {
+      accountId: 'dy',
+      at: '2026-10-28',
+      commentCount: 0,
+    }).find((r) => r.key === 'read')?.state,
+  ).toBe('pending');
+  expect(
+    connectionEvidence(state, 'douyin', {
+      accountId: 'dy',
+      at: '2026-10-28',
+      commentCount: 3,
+    }).find((r) => r.key === 'read')?.state,
+  ).toBe('confirmed');
+  expect(
+    connectionEvidence(state, 'douyin', {
+      accountId: 'old',
+      at: '2026-10-28',
+      commentCount: 3,
+    }).find((r) => r.key === 'read')?.state,
+  ).toBe('pending');
 });

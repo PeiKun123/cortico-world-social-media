@@ -101,7 +101,7 @@ export class SocialMediaWorld implements World {
     const host = this.host;
     const batches = await this.groups.pollBatches(this.controller.signal);
     for (const batch of batches) {
-      const activity = this.groupConfig.activity ?? 'balanced';
+      const activity = this.groupConfig.activity ?? 'active';
       await host.pushEvent({
         type: 'socialmedia.group.message',
         source: this.id,
@@ -135,13 +135,14 @@ export class SocialMediaWorld implements World {
   }
   private async maybeOfferGroup() {
     const host = this.host,
-      idle = this.groupConfig.proactiveIdleMinutes ?? 20;
+      idle = this.groupConfig.proactiveIdleMinutes ?? 5;
     if (
       !host ||
       !this.groupConfig.proactiveEnabled ||
       !this.groupConfig.allowSend ||
       this.phase !== 'idle' ||
-      Date.now() - Math.max(this.idleSince, this.dynamicStartedAt) < idle * 60000 ||
+      // Internal work must not restart external-chat quiet time. Keep only startup grace here.
+      Date.now() - this.dynamicStartedAt < idle * 60000 ||
       this.service.pendingReplies().length ||
       this.service.roaming.status().active
     )
@@ -215,6 +216,7 @@ export class SocialMediaWorld implements World {
       () => ctx.cfg.media.browserCacheMB ?? RESOURCE_DEFAULTS.browserCacheMB,
       () => this.groupConfig.enabled,
       () => ctx.cfg.douyinBrowser?.releaseAfterTask ?? true,
+      () => ctx.cfg.douyinBrowser?.compatibilityWindow ?? false,
     );
     this.browserSender = new BilibiliBrowserSender(
       join(ctx.dataDir, 'socialmedia', 'browser-profile'),
@@ -858,7 +860,20 @@ export class SocialMediaWorld implements World {
         ),
       };
     }
-    const platform = text(args.platform, 30);
+    let platformInput = args.platform;
+    if (
+      ['socialmedia_prepare', 'socialmedia_publish'].includes(name) &&
+      typeof args.inboxId === 'string'
+    ) {
+      const item = service.store.getInbox(args.inboxId);
+      if (!item) throw Error('收件箱消息不存在，请从待办中复制完整inboxId。');
+      if (platformInput !== undefined && platformInput !== item.platform)
+        throw Error('平台与这条待办不一致；请使用原待办的平台，不会改投其他平台。');
+      platformInput = item.platform;
+    }
+    if (typeof platformInput !== 'string' || !platformInput.trim())
+      throw Error('缺少平台platform；回复已保存待办时可提供完整inboxId自动确定平台。');
+    const platform = text(platformInput, 30);
     if (roamId) service.roaming.usePlatform(roamId, platform);
     const adapter = service.platform(platform);
     if (name === 'socialmedia_prepare') {
@@ -1464,12 +1479,16 @@ export class SocialMediaWorld implements World {
           if (panel !== 'settings') throw Error('请在配置页修改设置');
           const ksBackground = this.ctx.cfg.kuaishouBrowser?.background ?? true;
           const background = this.ctx.cfg.douyinBrowser?.background ?? true;
+          const compatibilityWindow = this.ctx.cfg.douyinBrowser?.compatibilityWindow ?? false;
           this.ctx.persist(settingsPatch(args[0]));
           if (ksBackground !== (this.ctx.cfg.kuaishouBrowser?.background ?? true))
             await this.kuaishou.closeLogin();
           if (!this.ctx.cfg.platforms.kuaishou?.enabled) await this.kuaishou.stop();
           else this.kuaishou.reset();
-          if (background !== (this.ctx.cfg.douyinBrowser?.background ?? true))
+          if (
+            background !== (this.ctx.cfg.douyinBrowser?.background ?? true) ||
+            compatibilityWindow !== (this.ctx.cfg.douyinBrowser?.compatibilityWindow ?? false)
+          )
             await this.douyin.closeLogin();
           if (!this.ctx.cfg.platforms.douyin?.enabled) await this.douyin.stop();
           else this.douyin.reset();
@@ -1593,12 +1612,21 @@ export class SocialMediaWorld implements World {
           if (v) this.service.store.rememberVideo(v, '快手只读检查');
           this.service.store.rememberComments(comments);
           return {
+            commentCount: comments.items.length,
             detail: limitation
               ? limitation + ' 已读取' + comments.items.length + '条评论；未发送内容。'
               : '已读取《' + v!.title + '》 · ' + comments.items.length + '条评论；未发送内容。',
           };
         }
-        if (['douyinLogin', 'douyinFinishLogin', 'douyinCheck', 'douyinClose'].includes(method)) {
+        if (
+          [
+            'douyinLogin',
+            'douyinFinishLogin',
+            'douyinCheck',
+            'douyinFeedCheck',
+            'douyinClose',
+          ].includes(method)
+        ) {
           if (panel !== 'settings') throw Error('请在配置页操作抖音连接');
           if (method === 'douyinClose') {
             await this.douyin.closeLogin();
@@ -1610,6 +1638,17 @@ export class SocialMediaWorld implements World {
             await this.douyin.closeLogin();
             const account = await this.service.connect('douyin', this.controller.signal);
             return { detail: '已核对抖音账号：' + account.name };
+          }
+          if (method === 'douyinFeedCheck') {
+            this.service.platform('douyin');
+            const video = await this.douyin.nextVideo([], this.controller.signal);
+            this.service.store.rememberVideo(video, '配置页只读推荐流检查；未发布内容。');
+            return {
+              detail:
+                '抖音推荐流读取成功：《' +
+                video.title +
+                '》。仅检查当前后台/窗口模式，未发送任何内容。',
+            };
           }
           if (typeof args[0] !== 'string' || !args[0].trim())
             return { detail: '请先填写抖音作品链接或作品编号，再检查读取。' };
@@ -1632,6 +1671,7 @@ export class SocialMediaWorld implements World {
               comments.items.length +
               '条评论；未发送任何内容。' +
               (comments.items.length ? '' : ' ' + comments.reason),
+            commentCount: comments.items.length,
             ...(comments.readState ? { readState: comments.readState } : {}),
           };
         }

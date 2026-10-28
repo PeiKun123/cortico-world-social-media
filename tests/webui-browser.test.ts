@@ -355,4 +355,61 @@ describe.skipIf(!findBrowserExecutable())('timeline in a real browser', () => {
       await page.close();
     }
   });
+  it('uses one platform-colored disclosure style for groups, dynamics and nested settings', async () => {
+    const page = await fixture(720);
+    try {
+      await page.evaluate(async () => {
+        const w = window as any;
+        w.testState.groupChat = {
+          enabled: true,
+          allowSend: false,
+          activity: 'balanced',
+          groups: [
+            {
+              id: '123',
+              name: '测试群',
+              connected: false,
+              connection: 'unbound',
+              pending: 0,
+              messages: [],
+            },
+          ],
+          outbox: [],
+        };
+        w.testState.dynamics = {
+          enabled: true,
+          items: [
+            {
+              id: '1',
+              author: '测试',
+              publishedAt: 1,
+              text: '动态正文',
+              url: 'https://t.bilibili.com/1',
+              imageCount: 0,
+            },
+          ],
+          posts: [],
+        };
+        for (const f of w.refreshers) await f();
+      });
+      const group = page.locator('.sm-group-records');
+      expect(await group.evaluate((n) => n.tagName)).toBe('DETAILS');
+      expect(
+        (await group.evaluate((n) => getComputedStyle(n).getPropertyValue('--sm-accent'))).trim(),
+      ).toBe('#e38eb8');
+      for (const summary of await page
+        .locator('.sm-group-records > summary,.sm-focus-card[data-platform="bilibili"] > summary')
+        .all()) {
+        expect(await summary.evaluate((n) => getComputedStyle(n, '::after').content)).toBe('""');
+        expect(await summary.evaluate((n) => getComputedStyle(n, '::after').borderRightStyle)).toBe(
+          'solid',
+        );
+      }
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
+        true,
+      );
+    } finally {
+      await page.close();
+    }
+  });
 });

@@ -200,7 +200,7 @@ export class GroupChats {
       enabled: this.cfg().enabled,
       allowSend: this.cfg().allowSend,
       proactiveEnabled: !!this.cfg().proactiveEnabled,
-      activity: this.cfg().activity ?? 'balanced',
+      activity: this.cfg().activity ?? 'active',
       groups: targets.map((t) => {
         const b = this.state.bindings.find((b) => b.id === t.id && b.name === t.name);
         const connection = !this.cfg().enabled
@@ -338,7 +338,7 @@ export class GroupChats {
     const c = { ...GROUP_DEFAULTS, ...this.cfg() },
       now = Date.now();
     if (!c.enabled || !c.allowSend || !c.proactiveEnabled || this.state.notices.length) return;
-    const interval = Math.max(30, c.proactiveIntervalMinutes ?? 120) * 60000;
+    const interval = Math.max(30, c.proactiveIntervalMinutes ?? 60) * 60000;
     const dayOf = (at: number) =>
       new Date(at).toLocaleDateString(
         'sv-SE',
@@ -360,7 +360,7 @@ export class GroupChats {
       if (!b || b.error || now - b.checkedAt > Math.max(180, c.intervalSec * 3) * 1000) continue;
       const key = [b.id, b.accountId, b.conversationId].join(':');
       const offers = (this.state.proactive ?? []).filter((o) => o.key === key);
-      if (offers.filter((o) => dayOf(o.at) === day).length >= (c.proactiveMaxDaily ?? 2)) continue;
+      if (offers.filter((o) => dayOf(o.at) === day).length >= (c.proactiveMaxDaily ?? 4)) continue;
       const lastSend =
         this.state.outbox
           .filter(

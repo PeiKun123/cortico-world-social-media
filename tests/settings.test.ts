@@ -41,3 +41,25 @@ it('accepts immediate browser release as an independent Douyin option', () => {
     douyinBrowser: { releaseAfterTask: true },
   });
 });
+
+it('accepts compatible background only as a separate explicit local option', () => {
+  expect(settingsPatch({ 'worlds.socialmedia.douyinBrowser.compatibilityWindow': true })).toEqual({
+    douyinBrowser: { compatibilityWindow: true },
+  });
+});
+
+it('starts new installations at active intensity while retaining explicit sending and monitoring opt-ins', async () => {
+  const { SOCIALMEDIA_DEFAULTS, ROAMING_PRESETS } = await import('../src/config.ts');
+  expect(SOCIALMEDIA_DEFAULTS.roaming).toEqual({ enabled: false, ...ROAMING_PRESETS.active });
+  const chat = SOCIALMEDIA_DEFAULTS.platforms.douyin.chat!;
+  expect(chat).toMatchObject({
+    activity: 'active',
+    enabled: false,
+    allowSend: false,
+    proactiveEnabled: false,
+    proactiveIdleMinutes: 5,
+    proactiveIntervalMinutes: 60,
+    proactiveMaxDaily: 4,
+  });
+  expect(SOCIALMEDIA_DEFAULTS.platforms.douyin.posting.enabled).toBe(false);
+});

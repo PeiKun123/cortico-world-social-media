@@ -989,3 +989,129 @@ it('offers a group topic only while quiet and idle, never sends automatically an
     vi.useRealTimers();
   }
 });
+
+it('derives a missing reply platform from the saved inbox and refuses a conflicting destination', async () => {
+  const x = setup();
+  x.cfg.enabled = true;
+  x.ctx.storeSecret('cookie', 'SESSDATA=test;bili_jct=test;DedeUserID=42');
+  const id = 'focus:bilibili:' + 'x'.repeat(230),
+    target = { oid: '99', type: 1, root: '100', parent: '101' };
+  (x.world as any).service.store.addInbox({
+    id,
+    platform: 'bilibili',
+    accountId: '42',
+    authorId: '7',
+    author: '路人',
+    text: '这个细节很用心',
+    target,
+    occurredAt: 1,
+    status: 'pending',
+  });
+  const tool = x.world.tools().find((t) => t.name === 'socialmedia_prepare')!;
+  const result = (await tool.handler(
+    { inboxId: id, draft: '这个小细节很可爱呀', purpose: '自然接话' },
+    {} as never,
+  )) as any;
+  expect(result.failed).not.toBe(true);
+  expect(JSON.parse(result.text)).toMatchObject({ platform: 'bilibili', target });
+  const wrong = (await tool.handler(
+    { platform: 'douyin', inboxId: id, draft: '你好' },
+    {} as never,
+  )) as any;
+  expect(wrong.failed).toBe(true);
+  expect(wrong.text).toContain('平台与这条待办不一致');
+  const absent = (await tool.handler({ inboxId: 'missing', draft: '你好' }, {} as never)) as any;
+  expect(absent.text).toContain('收件箱消息不存在');
+  const noTarget = (await tool.handler({ draft: '你好' }, {} as never)) as any;
+  expect(noTarget.text).toContain('缺少平台platform');
+});
+
+it('checks recommendation reading locally without posting or starting an autonomous round', async () => {
+  const x = setup();
+  x.cfg.platforms.douyin.enabled = true;
+  const dy = (x.world as any).douyin;
+  vi.spyOn(dy, 'nextVideo').mockResolvedValue({
+    id: '123',
+    aid: '123',
+    cid: '123',
+    title: '测试视频',
+    description: '',
+    author: '测试',
+    durationSec: 10,
+    cover: '',
+    url: 'https://www.douyin.com/video/123',
+    parts: [],
+  });
+  const result = await x.world.webUi().invoke!('settings', 'douyinFeedCheck', []);
+  expect(result).toMatchObject({ detail: expect.stringContaining('推荐流读取成功') });
+  expect(x.requests()).toBe(0);
+  await expect(x.world.webUi().invoke!('desk', 'douyinFeedCheck', [])).rejects.toThrow('配置页');
+});
+
+it('does not restart group quiet time after internal work while still respecting external messages and a busy model', async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date('2026-10-28T12:00:00Z'));
+  const x = setup(),
+    events: any[] = [];
+  let externalBusy = true;
+  x.cfg.enabled = true;
+  x.cfg.platforms.douyin.enabled = true;
+  x.cfg.platforms.douyin.chat = {
+    enabled: true,
+    allowSend: true,
+    groups: '123456|测试群',
+    intervalSec: 60,
+    minIntervalSec: 30,
+    maxDailyMessages: 100,
+    proactiveEnabled: true,
+    proactiveIdleMinutes: 5,
+    proactiveMaxDaily: 1,
+  };
+  vi.spyOn(x.world.douyin, 'readGroup').mockResolvedValue({
+    accountId: 'bot',
+    conversationId: 'conv',
+    name: '测试群',
+    messages: [
+      {
+        id: 'old',
+        senderId: 'u',
+        sender: '甲',
+        text: '昨天的背景',
+        own: false,
+        time: Date.now() - 86400000,
+        conversationId: 'conv',
+        serverStatus: 0,
+      },
+    ],
+  });
+  const send = vi.spyOn(x.world.douyin, 'sendGroup');
+  try {
+    await x.world.webUi().invoke!('settings', 'groupCheck', []);
+    await x.world.start({
+      store: { range: () => (externalBusy ? [{ type: 'qq.message' }] : []) },
+      pushEvent: async (e: any) => {
+        events.push(e);
+        return { cursor: events.length };
+      },
+    } as unknown as WorldHost);
+    for (let i = 0; i < 3; i++) {
+      x.world.onRunPhase({ state: 'model', enteredAt: new Date().toISOString(), running: [] });
+      await vi.advanceTimersByTimeAsync(110000);
+      x.world.onRunPhase({ state: 'idle', enteredAt: new Date().toISOString(), running: [] });
+      await vi.advanceTimersByTimeAsync(10000);
+    }
+    await (x.world as any).maybeOfferGroup();
+    expect(events.filter((e) => e.type === 'socialmedia.group.invite')).toHaveLength(0);
+    externalBusy = false;
+    x.world.onRunPhase({ state: 'model', enteredAt: new Date().toISOString(), running: [] });
+    await (x.world as any).maybeOfferGroup();
+    expect(events.filter((e) => e.type === 'socialmedia.group.invite')).toHaveLength(0);
+    x.world.onRunPhase({ state: 'idle', enteredAt: new Date().toISOString(), running: [] });
+    await (x.world as any).maybeOfferGroup();
+    expect(events.filter((e) => e.type === 'socialmedia.group.invite')).toHaveLength(1);
+    expect(send).not.toHaveBeenCalled();
+  } finally {
+    await x.world.stop();
+    vi.useRealTimers();
+  }
+});

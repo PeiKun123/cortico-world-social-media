@@ -15,6 +15,9 @@ describe.skipIf(!findBrowserExecutable())('Douyin real-browser offline boundarie
   });
   async function fixture(
     options: {
+      compatibilityWindow?: boolean;
+      coldFeed?: boolean;
+      verification?: boolean;
       userSearch?: boolean;
       needsRefresh?: boolean;
       movingIcon?: boolean;
@@ -39,6 +42,7 @@ describe.skipIf(!findBrowserExecutable())('Douyin real-browser offline boundarie
     } = {},
   ) {
     let accepted = 0;
+    const navigations: string[] = [];
     let launchedHeadless: boolean | undefined;
     let launchArgs: string[] = [];
     let pageLoads = 0;
@@ -57,6 +61,7 @@ describe.skipIf(!findBrowserExecutable())('Douyin real-browser offline boundarie
       () => 128,
       () => options.groupListening ?? false,
       () => options.releaseAfterTask ?? false,
+      () => options.compatibilityWindow ?? false,
     );
     const launch = vi
       .spyOn(chromium, 'launchPersistentContext')
@@ -67,6 +72,21 @@ describe.skipIf(!findBrowserExecutable())('Douyin real-browser offline boundarie
         await context.setOffline(true);
         await context.route('**/*', async (route) => {
           const path = new URL(route.request().url()).pathname;
+          if (route.request().isNavigationRequest()) navigations.push(route.request().url());
+          if (options.verification)
+            return route.fulfill({
+              contentType: 'text/html; charset=utf-8',
+              body: '<title>验证码中间页</title><body></body>',
+            });
+          if (
+            options.coldFeed &&
+            path === '/jingxuan' &&
+            !new URL(route.request().url()).searchParams.has('modal_id')
+          )
+            return route.fulfill({
+              contentType: 'text/html; charset=utf-8',
+              body: '<a href="/?recommend=1&from_nav=1">推荐</a>',
+            });
           if (options.userSearch && path === '/aweme/v1/web/discover/search/')
             return route.fulfill({
               contentType: 'application/json',
@@ -76,15 +96,15 @@ describe.skipIf(!findBrowserExecutable())('Douyin real-browser offline boundarie
                   {
                     user_info: {
                       sec_uid: 'MS4wLjABAAAAtest_owner_identity',
-                      unique_id: '1809102273',
-                      short_id: '1809102273',
+                      unique_id: '1234567890',
+                      short_id: '1234567890',
                       nickname: '主人',
                     },
                   },
                   {
                     user_info: {
                       sec_uid: 'MS4wLjABAAAAdifferent_owner',
-                      unique_id: '18091022730',
+                      unique_id: '12345678900',
                       nickname: '同名',
                     },
                   },
@@ -94,7 +114,7 @@ describe.skipIf(!findBrowserExecutable())('Douyin real-browser offline boundarie
           if (options.userSearch && path.startsWith('/search/'))
             return route.fulfill({
               contentType: 'text/html',
-              body: '<p>抖音号: 18091022736.6万获赞</p><script>fetch("/aweme/v1/web/discover/search/?keyword=1809102273")</script>',
+              body: '<p>抖音号: 12345678906.6万获赞</p><script>fetch("/aweme/v1/web/discover/search/?keyword=1234567890")</script>',
             });
           if (path === '/aweme/v1/web/user/profile/self/')
             return route.fulfill({
@@ -235,6 +255,7 @@ describe.skipIf(!findBrowserExecutable())('Douyin real-browser offline boundarie
       });
     return {
       adapter,
+      navigations,
       headless: () => launchedHeadless,
       launchArgs: () => launchArgs,
       accepted: () => accepted,
@@ -266,7 +287,7 @@ describe.skipIf(!findBrowserExecutable())('Douyin real-browser offline boundarie
   it('resolves an exact Douyin handle from the official user search response even when DOM numbers are joined', async () => {
     const f = await fixture({ userSearch: true });
     try {
-      expect(await f.adapter.resolveCreator('1809102273')).toEqual({
+      expect(await f.adapter.resolveCreator('1234567890')).toEqual({
         id: 'MS4wLjABAAAAtest_owner_identity',
         name: '主人',
       });
@@ -685,6 +706,58 @@ describe.skipIf(!findBrowserExecutable())('Douyin real-browser offline boundarie
       expect(Boolean(f.current())).toBe(false);
     } finally {
       action.mockRestore();
+      await f.cleanup();
+    }
+  });
+  it('initializes recommendations from the official entry in a cold background context', async () => {
+    const f = await fixture({ coldFeed: true, feed: true });
+    try {
+      expect((await f.adapter.nextVideo([])).id).toBe(id);
+      expect(new URL(f.navigations[0]).pathname).toBe('/jingxuan');
+      expect(f.navigations.some((url) => new URL(url).searchParams.get('from_nav') === '1')).toBe(
+        true,
+      );
+      expect(f.headless()).toBe(true);
+      expect(f.accepted()).toBe(0);
+    } finally {
+      await f.cleanup();
+    }
+  });
+  it('recognizes explicit verification without calling it a logged-out account or waiting through feed retries', async () => {
+    const f = await fixture({ verification: true });
+    try {
+      await expect(f.adapter.nextVideo([], AbortSignal.timeout(1500))).rejects.toThrow('人工验证');
+      expect(f.accepted()).toBe(0);
+    } finally {
+      await f.cleanup();
+    }
+  });
+  it.skipIf(process.platform !== 'win32')(
+    'keeps compatible Windows background windows offscreen and explicitly restores a visible login',
+    async () => {
+      const f = await fixture({ compatibilityWindow: true });
+      try {
+        await f.adapter.video(id);
+        expect(f.headless()).toBe(false);
+        expect(f.launchArgs()).toContain('--window-position=-32000,-32000');
+        expect(f.launchArgs()).toContain('--disable-background-timer-throttling');
+        await f.adapter.openLogin();
+        expect(f.headless()).toBe(false);
+        expect(f.launchArgs()).not.toContain('--window-position=-32000,-32000');
+        expect(f.launchArgs()).toContain('--window-position=100,100');
+      } finally {
+        await f.cleanup();
+      }
+    },
+  );
+  it('bootstraps the official entry again after releasing a recommendation browser', async () => {
+    const f = await fixture({ coldFeed: true, feed: true, releaseAfterTask: true });
+    try {
+      expect((await f.adapter.nextVideo([])).id).toBe(id);
+      expect((await f.adapter.nextVideo([id])).id).toBe('7697799441646256821');
+      expect(f.navigations.filter((url) => new URL(url).pathname === '/jingxuan')).toHaveLength(2);
+      expect(f.current()).toBeUndefined();
+    } finally {
       await f.cleanup();
     }
   });

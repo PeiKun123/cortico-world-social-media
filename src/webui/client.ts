@@ -86,6 +86,112 @@ interface Snapshot {
   inbox: InboxItem[];
   outbox: SendRecord[];
 }
+interface CommentReadProof {
+  accountId?: string;
+  at: string;
+  commentCount: number;
+}
+export function connectionEvidence(state: Snapshot, platform: string, read?: CommentReadProof) {
+  const account = state.platforms.find((p) => p.id === platform)?.account?.id;
+  const own = account
+    ? state.outbox.filter(
+        (r) =>
+          r.platform === platform && r.accountId === account && r.status === 'sent' && r.receiptId,
+      )
+    : [];
+  const comment = own.find((r) => r.target.root === '0'),
+    reply = own.find((r) => r.target.root !== '0'),
+    visible = own.find((r) => r.visibility?.status === 'public');
+  const received = account
+    ? state.inbox.filter((i) => i.platform === platform && i.accountId === account)
+    : [];
+  const proof = read?.accountId === account ? read : undefined;
+  const stamp = (at?: string) => (at ? '最近记录 ' + prettyTime(at) : '');
+  const p = state.platforms.find((p) => p.id === platform);
+  const rows = [
+    {
+      key: 'account',
+      label: '登录账号',
+      state: p?.error ? 'attention' : account ? 'confirmed' : 'pending',
+      value: p?.error ? '需要检查' : account ? '账号已核对' : '尚未核对',
+      detail: p?.error ?? p?.account?.name ?? '登录后检查；已登录不代表所有读写都已通过。',
+    },
+    {
+      key: 'read',
+      label: '评论读取',
+      state: proof?.commentCount || received.length ? 'confirmed' : 'pending',
+      value: proof?.commentCount
+        ? '已读到评论'
+        : received.length
+          ? '有评论通知记录'
+          : proof
+            ? '页面已读 · 暂无评论'
+            : '尚未验证',
+      detail: proof
+        ? stamp(proof.at) + ' · ' + proof.commentCount + '条评论'
+        : received.length
+          ? '依据当前账号收到的评论通知，当前连接仍以检查结果为准。'
+          : '抖音、快手可填作品链接测试；B站可先同步评论通知。',
+    },
+    {
+      key: 'comment',
+      label: '主评论发送',
+      state: comment ? 'confirmed' : 'pending',
+      value: comment ? '平台已受理' : '尚无成功记录',
+      detail: comment
+        ? stamp(comment.createdAt) + '；不等于其他账号可见。'
+        : '不会为检查自动公开发评。正常发送后显示结果。',
+    },
+    {
+      key: 'reply',
+      label: '回复评论',
+      state: reply ? 'confirmed' : 'pending',
+      value: reply ? '回复已受理' : '尚无回复成功记录',
+      detail: reply
+        ? stamp(reply.createdAt) + '；回复和主评论分别判断。'
+        : '需要实际楼层回复的成功回执，仅有主评论不算。',
+    },
+    {
+      key: 'visibility',
+      label: '他人可见',
+      state: visible ? 'confirmed' : 'pending',
+      value: visible ? '有公开核验记录' : '尚未验证',
+      detail: visible
+        ? stamp(visible.visibility?.checkedAt) + '；仅代表当时这条评论。'
+        : '平台受理不等于公开。请用其他账号查看原评论，不要反复重发。',
+    },
+  ];
+  if (platform === 'bilibili') {
+    const posts = account
+      ? (state.dynamics?.posts ?? []).filter(
+          (p) => p.accountId === account && p.status === 'sent' && p.dynamicId,
+        )
+      : [];
+    const post = posts[0],
+      mention = own.find((r) => r.mention) || posts.find((p) => p.mention);
+    rows.push(
+      {
+        key: 'dynamic',
+        label: '发布动态',
+        state: post ? 'confirmed' : 'pending',
+        value: post ? '动态已受理' : '尚无发布成功记录',
+        detail: post
+          ? stamp(post.attemptedAt ?? post.createdAt) + '；公开状态需从其他账号核对。'
+          : '先开启动态发布；读取动态或开启开关不等于发布已验证。',
+      },
+      {
+        key: 'mention',
+        label: '@特别关注',
+        state: mention ? 'confirmed' : 'pending',
+        value: mention ? '已提交含@内容' : '尚未验证',
+        detail: mention
+          ? '已有带@内容的成功回执；对方是否收到通知仍未验证。'
+          : '先绑定主人并开启允许主动@。动态内原生@与评论接口@路径不同。',
+      },
+    );
+  }
+  return rows;
+}
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, text?: string, cls?: string) {
   const node = document.createElement(tag);
   if (text !== undefined) node.textContent = text;
@@ -116,6 +222,71 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
     return (document.scrollingElement ?? document.documentElement) as HTMLElement;
   }
   root.classList.add('socialmedia-desk');
+  let evidenceSnapshot: Snapshot | undefined;
+  const readProofs = new Map<string, CommentReadProof>(
+    Object.entries(ctx.memo?.get<Record<string, CommentReadProof>>('read-checks', {}) ?? {}),
+  );
+  const evidenceViews = new Map<string, { summary: HTMLElement; body: HTMLDListElement }>();
+  function usageChecks(id: string) {
+    const box = fold('使用检查', 'sm-subsection sm-readiness');
+    box.dataset.platform = id;
+    const count = el('span', '', 'sm-fold-status'),
+      body = el('dl');
+    box.querySelector('summary')!.append(count);
+    box.append(
+      body,
+      el(
+        'p',
+        '依据当前账号的检查与历史回执显示。“已受理”不代表公开或通知已送达；这里不会自动发送测试内容。',
+        'sm-muted',
+      ),
+    );
+    evidenceViews.set(id, { summary: count, body });
+    return box;
+  }
+  function loginGuide(id: string) {
+    const name = id === 'bilibili' ? 'B站' : id === 'douyin' ? '抖音' : '快手',
+      box = fold('登录、验证码与验证结果', 'sm-subsection sm-setup-guide'),
+      list = el('ol');
+    const steps =
+      id === 'bilibili'
+        ? [
+            '扫码登录后在手机确认；App不兼容时，可用“打开B站登录窗口”在官网完成登录。',
+            '官网要求滑块、验证码或安全检查时，请在登录窗口手动完成，再点“完成B站网页登录”并检查登录。不要把验证码或Cookie发给Bot。',
+            '“检查网页发评”只检查网页和评论框，不会真实发送。“立即同步”读取评论通知，不代表已经回复。',
+            '动态发布和主动@的开关只是授权。实际发送后才有回执；公开可见与@通知送达还需单独核对。',
+          ]
+        : [
+            '点击“打开' + name + '登录窗口”，在独立Edge中登录；日常浏览器的登录与这里独立。',
+            '在官网手动完成滑块、验证码或安全检查，再回此页点“完成' +
+              name +
+              '登录”；它只核对账号，不代表刷视频、发评都通过。',
+            id === 'douyin'
+              ? '在“读取与连接检查”检查推荐流，或填作品链接测试评论。后台遇到验证不一定是掉线；Windows可主动使用连接选项里的兼容窗口模式，仍需完成官网验证。'
+              : '在“读取与连接检查”填普通视频链接测试评论；图文自动发评与群聊尚未支持。',
+            '读取检查不会公开发送。正常发评后查看回执；结果未知时不要重复提交，先去原作品或其他账号核对。',
+          ];
+    for (const step of steps) list.append(el('li', step));
+    box.append(list);
+    return box;
+  }
+  function renderEvidence(state: Snapshot) {
+    evidenceSnapshot = state;
+    for (const [id, view] of evidenceViews) {
+      const rows = connectionEvidence(state, id, readProofs.get(id));
+      view.summary.textContent =
+        rows.filter((r) => r.state === 'confirmed').length + '项已有结果 / ' + rows.length + '项';
+      view.body.replaceChildren();
+      for (const row of rows) {
+        const term = el('dt', row.label),
+          value = el('dd');
+        value.dataset.state = row.state;
+        value.append(el('span', row.value, 'sm-evidence-value'), el('small', row.detail));
+        view.body.append(term, value);
+      }
+    }
+  }
+
   function fold(title: string, cls = 'sm-subsection') {
     const details = el('details', undefined, cls);
     details.append(el('summary', title));
@@ -392,10 +563,19 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
           }
           status.textContent = read ? '正在读取指定作品和评论…' : label + '…';
           try {
-            const r = await ctx.invoke<{ detail: string }>(
+            const accountId = evidenceSnapshot?.platforms.find((p) => p.id === id)?.account?.id;
+            const r = await ctx.invoke<{ detail: string; commentCount?: number }>(
               method,
               read ? [input.value.trim()] : [],
             );
+            if (read && typeof r.commentCount === 'number') {
+              readProofs.set(id, {
+                accountId,
+                at: new Date().toISOString(),
+                commentCount: r.commentCount,
+              });
+              ctx.memo?.set('read-checks', Object.fromEntries(readProofs));
+            }
             status.textContent = r.detail;
             await refresh();
           } catch (e) {
@@ -411,9 +591,20 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
     const readButton = action('测试' + title + '读取', id + 'Check', true);
     const checks = fold('读取与连接检查', 'sm-subsection sm-connection-check');
     checks.append(el('p', '检查指定作品和评论，不会发布内容。', 'sm-muted'), input, readButton);
+    if (id === 'douyin') {
+      const feedButton = action('检查抖音推荐流', 'douyinFeedCheck');
+      checks.append(
+        feedButton,
+        el(
+          'p',
+          '使用当前后台设置检查推荐流，不需要填写链接，不会发评。官网要求人工验证时，请打开上方登录窗口完成验证；验证后仍可能需要再次检查。',
+          'sm-muted',
+        ),
+      );
+    }
     const switches = el('div', undefined, 'sm-controls');
     switches.append(enabled.parentElement!, posting.parentElement!);
-    section.append(status, switches, buttons, checks);
+    section.append(status, switches, buttons, usageChecks(id), checks, loginGuide(id));
     return {
       section,
       status,
@@ -457,7 +648,13 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
   const kuaishouFocusStatus = el('p', '', 'sm-muted');
   kuaishouFocusSection.append(kuaishouFocusStatus);
   const settings = el('div', undefined, 'sm-settings');
-  accountSection.append(toolbar, connectionResults, loginBox);
+  accountSection.append(
+    toolbar,
+    connectionResults,
+    loginBox,
+    usageChecks('bilibili'),
+    loginGuide('bilibili'),
+  );
   const extraInputs = new Map<string, HTMLInputElement | HTMLSelectElement>();
   const dirtyExtras = new Set<string>();
   type SaveScope = 'bilibili' | 'douyin' | 'kuaishou' | 'resources';
@@ -1158,15 +1355,12 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
     '抖音特别关注',
     'douyin',
   );
-  const groupRecords = el('section', undefined, 'sm-group-records');
+  const groupRecords = fold('抖音群 · 对话记录', 'sm-focus-card sm-group-records');
+  groupRecords.open = true;
   groupRecords.dataset.platform = 'douyin';
-  const groupHeading = el('div', undefined, 'sm-feed-heading');
-  groupHeading.append(
-    el('h3', '抖音群 · 对话'),
-    el('span', '与评论记录分开保存，按群查看。', 'sm-muted'),
-  );
   const groupRecordBody = el('div');
-  groupRecords.append(groupHeading, groupRecordBody);
+  groupRecordBody.className = 'sm-focus-body';
+  groupRecords.append(groupRecordBody);
   let groupDigest = '';
   function groupHealth(g: NonNullable<Snapshot['groupChat']>['groups'][number]) {
     return (
@@ -1705,6 +1899,7 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
     }
   }
   function render(state: Snapshot) {
+    renderEvidence(state);
     readDynamicsButton.disabled = !state.dynamics?.enabled;
     dynamicRecords.hidden = !state.dynamics?.items.length;
     dynamicBody.replaceChildren();
