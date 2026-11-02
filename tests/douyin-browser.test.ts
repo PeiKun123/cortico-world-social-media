@@ -5,6 +5,7 @@ import { findBrowserExecutable } from '../src/platforms/bilibili-browser.ts';
 const id = '7697799441646256819';
 const target = { oid: id, type: 2, root: '0', parent: '0' };
 // Every request is intercepted and the context is offline: no real account or public comment.
+vi.setConfig({ testTimeout: 45000 });
 describe.skipIf(!findBrowserExecutable())('Douyin real-browser offline boundaries', () => {
   let browser: Browser;
   beforeAll(async () => {
@@ -24,6 +25,9 @@ describe.skipIf(!findBrowserExecutable())('Douyin real-browser offline boundarie
       autoCollapse?: boolean;
       hiddenList?: boolean;
       thread?: boolean;
+      slowPanel?: boolean;
+      laterThread?: boolean;
+      laterCursor?: boolean;
       wrongReply?: boolean;
       delayedSelf?: boolean;
       noSlash?: boolean;
@@ -62,6 +66,7 @@ describe.skipIf(!findBrowserExecutable())('Douyin real-browser offline boundarie
       () => options.groupListening ?? false,
       () => options.releaseAfterTask ?? false,
       () => options.compatibilityWindow ?? false,
+      () => 15,
     );
     const launch = vi
       .spyOn(chromium, 'launchPersistentContext')
@@ -221,6 +226,18 @@ describe.skipIf(!findBrowserExecutable())('Douyin real-browser offline boundarie
                         JSON.stringify(childHTML) +
                         ';document.querySelector("#expand").remove();document.querySelector("#reply-child").onclick=()=>{window.replyRoot="88";window.replyParent="99";};};};'
                       : '') +
+                    (options.slowPanel
+                      ? 'const openPanel=document.querySelector("[data-e2e=feed-comment-icon]").onclick;let panelTimer;document.querySelector("[data-e2e=feed-comment-icon]").onclick=()=>{if(panelTimer){clearTimeout(panelTimer);panelTimer=undefined;return;}panelTimer=setTimeout(openPanel,4200);};'
+                      : '') +
+                    (options.laterThread || options.laterCursor
+                      ? 'const openFirst=document.querySelector("[data-e2e=feed-comment-icon]").onclick;document.querySelector("[data-e2e=feed-comment-icon]").onclick=async()=>{await openFirst();document.querySelector("#rows").innerHTML="<div data-e2e=comment-item><a href=/user/MS4wLjABAAAAtest_person>前排</a><span id=tooltip_77></span><div class=FduGc_lz>第一页</div></div>";};window.addEventListener("wheel",()=>{document.querySelector("#rows").innerHTML=' +
+                        JSON.stringify(threadHTML) +
+                        ';document.querySelector("#expand").onclick=()=>{document.querySelector("#children").innerHTML=' +
+                        JSON.stringify(childHTML) +
+                        ';document.querySelector("#expand").remove();document.querySelector("#reply-child").onclick=()=>{window.replyRoot="88";window.replyParent="99";};};fetch("/aweme/v1/web/comment/list/?aweme_id=' +
+                        id +
+                        '&cursor=10");},{once:true});'
+                      : '') +
                     (options.hiddenList
                       ? 'document.querySelector("#rows").innerHTML=' +
                         JSON.stringify(threadHTML) +
@@ -268,6 +285,38 @@ describe.skipIf(!findBrowserExecutable())('Douyin real-browser offline boundarie
       },
     };
   }
+  it('waits for a slow panel without toggling it shut during loading', async () => {
+    const f = await fixture({ slowPanel: true, thread: true, ssr: true });
+    try {
+      const result = await f.adapter.comments(target);
+      expect(result.items.some((c) => c.id === '88')).toBe(true);
+      expect(f.accepted()).toBe(0);
+    } finally {
+      await f.cleanup();
+    }
+  }, 22000);
+  it('finds the requested older root and child by scrolling the official list', async () => {
+    const f = await fixture({ laterThread: true, thread: true, ssr: true });
+    try {
+      const result = await f.adapter.comments({ ...target, root: '88', parent: '99' });
+      expect(result.root?.id).toBe('88');
+      expect(result.items.some((c) => c.id === '99')).toBe(true);
+      expect(f.accepted()).toBe(0);
+    } finally {
+      await f.cleanup();
+    }
+  }, 22000);
+  it('reaches a requested cursor even when the caller has not incremented page', async () => {
+    const f = await fixture({ laterCursor: true, ssr: true });
+    try {
+      const result = await f.adapter.comments(target, 1, undefined, '10');
+      expect(result.reason).not.toContain('尚未到达');
+      expect(result.items.some((c) => c.id === '88')).toBe(true);
+      expect(f.accepted()).toBe(0);
+    } finally {
+      await f.cleanup();
+    }
+  }, 22000);
   it('keeps ordinary browsing hidden but explicitly opens a visible login window', async () => {
     const f = await fixture();
     try {

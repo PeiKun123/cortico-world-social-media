@@ -164,7 +164,8 @@ export class SocialMediaWorld implements World {
     await host.pushEvent({
       type: 'socialmedia.group.invite',
       source: this.id,
-      origin: 'internal',
+      // The offer contains externally controlled group names and message text.
+      origin: 'external',
       ts: nowIso(this.ctx.timezone),
       text:
         '现在有一个可放弃的抖音群新话题机会，只能去下面指定的本地群。没有新消息不代表读取失败，也不必硬找话。愿意聊时先socialmedia_groupchat read核对现状；用prepare、send，replyTo留空，准备后已出现新聊天就顺着新话题或放弃。不要搬运QQ、Dungeon、私人记忆或其他群文案。' +
@@ -217,6 +218,7 @@ export class SocialMediaWorld implements World {
       () => this.groupConfig.enabled,
       () => ctx.cfg.douyinBrowser?.releaseAfterTask ?? true,
       () => ctx.cfg.douyinBrowser?.compatibilityWindow ?? false,
+      () => ctx.cfg.douyinBrowser?.pageWaitSeconds ?? 45,
     );
     this.browserSender = new BilibiliBrowserSender(
       join(ctx.dataDir, 'socialmedia', 'browser-profile'),

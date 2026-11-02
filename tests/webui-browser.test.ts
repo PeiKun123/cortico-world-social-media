@@ -251,6 +251,25 @@ describe.skipIf(!findBrowserExecutable())('timeline in a real browser', () => {
       await page.close();
     }
   });
+  it('keeps the adjustable Douyin loading wait inside the collapsed connection options', async () => {
+    const page = await fixture(1100, true);
+    try {
+      await page.getByRole('tab', { name: '抖音', exact: true }).click();
+      const options = page.locator('.sm-platform-card[data-platform=douyin] .sm-platform-advanced');
+      expect(await options.evaluate((e) => (e as HTMLDetailsElement).open)).toBe(false);
+      const field = page.getByRole('spinbutton', { name: '网页加载等待上限（秒）', exact: true });
+      expect(await field.isVisible()).toBe(false);
+      await options.locator(':scope > summary').click();
+      expect(await field.inputValue()).toBe('45');
+      expect(await field.getAttribute('min')).toBe('15');
+      expect(await field.getAttribute('max')).toBe('120');
+      await field.fill('90');
+      await page.getByRole('button', { name: '保存抖音设置', exact: true }).click();
+      expect(await page.evaluate(() => (window as any).calls.includes('settings'))).toBe(true);
+    } finally {
+      await page.close();
+    }
+  });
   it('loads archived sends into the existing per-video timeline on demand', async () => {
     const page = await fixture(1100);
     try {

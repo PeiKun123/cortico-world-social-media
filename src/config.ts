@@ -128,6 +128,7 @@ export interface SocialMediaConfigSection {
     background: boolean;
     releaseAfterTask?: boolean;
     compatibilityWindow?: boolean;
+    pageWaitSeconds?: number;
   };
   kuaishouBrowser?: { executableFile: string; background: boolean };
 }
@@ -223,6 +224,7 @@ export const SOCIALMEDIA_DEFAULTS: SocialMediaConfigSection = {
     background: true,
     releaseAfterTask: true,
     compatibilityWindow: false,
+    pageWaitSeconds: 45,
   },
   kuaishouBrowser: { executableFile: '', background: true },
 };
@@ -516,6 +518,15 @@ export const SOCIALMEDIA_CONFIG_GROUP: ConfigGroup = {
         type: 'string',
         title: '抖音浏览器程序',
         description: '留空优先使用Edge，再寻找Chrome；与B站设置独立。',
+        'x-hot': true,
+      },
+      'worlds.socialmedia.douyinBrowser.pageWaitSeconds': {
+        type: 'integer',
+        title: '网页加载等待上限（秒）',
+        description:
+          '默认45秒，可设15–120秒。用于作品、评论区与指定楼层的加载等待，慢网络可调大；成功就提前继续，不固定停留。到期保留准确失败阶段；发送结果不明不会自动补发，任务结束仍释放浏览器。',
+        minimum: 15,
+        maximum: 120,
         'x-hot': true,
       },
       'worlds.socialmedia.douyinBrowser.releaseAfterTask': {

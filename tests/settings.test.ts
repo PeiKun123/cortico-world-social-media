@@ -63,3 +63,13 @@ it('starts new installations at active intensity while retaining explicit sendin
   });
   expect(SOCIALMEDIA_DEFAULTS.platforms.douyin.posting.enabled).toBe(false);
 });
+
+it('validates the adjustable Douyin page wait without changing release or publishing permissions', () => {
+  expect(settingsPatch({ 'worlds.socialmedia.douyinBrowser.pageWaitSeconds': 90 })).toEqual({
+    douyinBrowser: { pageWaitSeconds: 90 },
+  });
+  for (const n of [0, 121, 'forever'])
+    expect(() =>
+      settingsPatch({ 'worlds.socialmedia.douyinBrowser.pageWaitSeconds': n }),
+    ).toThrow();
+});

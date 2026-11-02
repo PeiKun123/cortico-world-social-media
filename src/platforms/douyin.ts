@@ -163,7 +163,12 @@ export class DouyinPlatform implements SocialPlatform {
     private groupListening: () => boolean = () => false,
     private releaseAfterTask: () => boolean = () => true,
     private compatibilityWindow: () => boolean = () => false,
+    private pageWaitSeconds: () => number = () => 45,
   ) {}
+  private timeoutMs() {
+    const value = this.pageWaitSeconds();
+    return (Number.isFinite(value) ? Math.max(15, Math.min(120, value)) : 45) * 1000;
+  }
   status() {
     return {
       available: Boolean(edgeExecutable(this.executable())),
@@ -410,7 +415,7 @@ export class DouyinPlatform implements SocialPlatform {
     action: (page: Page, data: Capture) => Promise<T>,
     signal?: AbortSignal,
     visible = false,
-    budgetMs = 45000,
+    budgetMs = this.timeoutMs() * 3 + 30000,
     kind: 'main' | 'chat' | 'send' = 'main',
   ): Promise<T> {
     return this.serial(async () => {
@@ -434,7 +439,7 @@ export class DouyinPlatform implements SocialPlatform {
         await ctx.close().catch(() => {});
         combined.throwIfAborted();
       }
-      p.setDefaultTimeout(6500);
+      p.setDefaultTimeout(this.timeoutMs());
       let data = this.pageData.get(p);
       if (!data) {
         data = this.capture(p);
@@ -451,7 +456,7 @@ export class DouyinPlatform implements SocialPlatform {
           data.rows = [];
           data.pages = [];
           data.self = undefined;
-          await p.goto(url, { waitUntil: 'domcontentloaded', timeout: 22000 });
+          await p.goto(url, { waitUntil: 'domcontentloaded', timeout: this.timeoutMs() });
         }
         if (new URL(p.url()).origin !== ORIGIN)
           throw new PlatformError('官网跳转到了未支持的地址，停止本次操作。', 'rejected');
@@ -1093,21 +1098,21 @@ export class DouyinPlatform implements SocialPlatform {
     return data.rows.some((c) => c.target.oid === id);
   }
   private async commentArea(p: Page, data: Capture, id: string, refresh = true): Promise<void> {
-    await this.settle(p, data, async () => Boolean(await this.pageVideo(p, data, id)), 15000);
-    await this.dismiss(p);
-    const rows = p.locator('[data-e2e="comment-item"]');
-    // The official page may auto-open the panel after metadata arrives. Do not toggle it closed while it mounts.
     await this.settle(
       p,
       data,
-      async () => {
-        await this.pageComments(p, data, id);
-        return Boolean(await rows.filter({ visible: true }).count());
-      },
-      1200,
+      async () => Boolean(await this.pageVideo(p, data, id)),
+      this.timeoutMs(),
     );
-    for (let attempt = 0; attempt < 2; attempt++) {
-      if (await rows.filter({ visible: true }).count()) break;
+    await this.dismiss(p);
+    const rows = p.locator('[data-e2e="comment-item"]');
+    const visible = async () => {
+      await this.pageComments(p, data, id);
+      return Boolean(await rows.filter({ visible: true }).count());
+    };
+    // A panel which is still mounting must not be toggled shut by an impatient second click.
+    await this.settle(p, data, visible, 1200);
+    for (let attempt = 0; attempt < 2 && !(await visible()); attempt++) {
       const tab = p.getByText('评论', { exact: true }).filter({ visible: true });
       if ((await tab.count()) === 1) await tab.dispatchEvent('click');
       else {
@@ -1128,20 +1133,53 @@ export class DouyinPlatform implements SocialPlatform {
       await this.settle(
         p,
         data,
-        async () => {
-          await this.pageComments(p, data, id);
-          return Boolean(await rows.filter({ visible: true }).count());
-        },
-        attempt ? 6500 : 2500,
+        async () =>
+          (await visible()) ||
+          Boolean((await rows.count()) && data.rows.some((c) => c.target.oid === id)),
+        this.timeoutMs(),
       );
+      if (await visible()) break;
+      // Only an already populated but hidden panel gets a second opening attempt.
+      if (!(await rows.count())) break;
     }
     await Promise.allSettled([...data.pending]);
     await this.pageComments(p, data, id);
     if (refresh && !data.rows.some((c) => c.target.oid === id) && !(await rows.count())) {
-      // One bounded refresh recovers a player mounted without its comment panel. No writes are retried.
-      await p.reload({ waitUntil: 'domcontentloaded', timeout: 12000 });
+      // One read-only refresh, only after the configured loading wait. Never retry a write.
+      await p.reload({ waitUntil: 'domcontentloaded', timeout: this.timeoutMs() });
       await this.commentArea(p, data, id, false);
     }
+  }
+  private async scrollComments(p: Page, data: Capture, id: string, waitMs: number) {
+    const rows = p.locator('[data-e2e="comment-item"]');
+    const fingerprint = () =>
+      rows.evaluateAll((es) =>
+        es
+          .map(
+            (e) =>
+              [...e.querySelectorAll('[id^="tooltip_"]')].find(
+                (n) => n.closest('[data-e2e="comment-item"]') === e,
+              )?.id ?? '',
+          )
+          .join('|'),
+      );
+    const before = await fingerprint(),
+      pages = data.pages.length;
+    const last = rows.filter({ visible: true }).last();
+    if (!(await last.count())) return false;
+    await last.scrollIntoViewIfNeeded({ timeout: Math.min(waitMs, 5000) });
+    await last.hover({ timeout: Math.min(waitMs, 5000) });
+    await p.mouse.wheel(0, 650);
+    await this.settle(
+      p,
+      data,
+      async () => {
+        await this.pageComments(p, data, id);
+        return data.pages.length !== pages || (await fingerprint()) !== before;
+      },
+      waitMs,
+    );
+    return data.pages.length !== pages || (await fingerprint()) !== before;
   }
   private async rowFor(p: Page, data: Capture, id: string) {
     const cid = numericId(id);
@@ -1186,47 +1224,92 @@ export class DouyinPlatform implements SocialPlatform {
     }
   }
   private async revealThread(p: Page, data: Capture, target: CommentTarget) {
-    await this.settle(
-      p,
-      data,
-      async () => {
-        await this.pageComments(p, data, target.oid);
-        return data.rows.some((c) => c.id === target.root && c.target.oid === target.oid);
-      },
-      6500,
-    );
-    for (let step = 0; step < 3; step++) {
+    const deadline = Date.now() + this.timeoutMs();
+    let root: Locator | undefined,
+      stalled = 0;
+    // Notifications may point beyond the first page. Locate the exact root in the official UI.
+    for (let step = 0; step < 20 && Date.now() < deadline; step++) {
       await this.pageComments(p, data, target.oid);
-      if (
+      try {
+        root = await this.rowFor(p, data, target.root);
+        break;
+      } catch (e) {
+        if (!(e instanceof PlatformError)) throw e;
+      }
+      const moved = await this.scrollComments(
+        p,
+        data,
+        target.oid,
+        Math.max(1, Math.min(5000, deadline - Date.now())),
+      );
+      stalled = moved ? 0 : stalled + 1;
+      if (stalled >= 2) break;
+    }
+    if (!root)
+      throw new PlatformError(
+        '已在限定时间内翻找官网评论列表，仍未展示指定主楼；可能未加载、被折叠或已删除，未改发其他楼层。',
+        'rejected',
+      );
+    for (let step = 0; step < 20 && Date.now() < deadline; step++) {
+      await this.pageComments(p, data, target.oid);
+      const child =
         target.parent !== target.root &&
-        data.rows.some((c) => c.id === target.parent && c.target.root === target.root)
-      ) {
+        data.rows.find((c) => c.id === target.parent && c.target.root === target.root);
+      if (child) {
         try {
           await this.rowFor(p, data, target.parent);
           return;
-        } catch {
-          /* The API may have prefetched a reply that still needs expanding. */
+        } catch (e) {
+          if (!(e instanceof PlatformError)) throw e;
         }
       }
-      const root = await this.rowFor(p, data, target.root);
       const expand = await this.ownAction(root, target.root, /(?:展开|查看|更多).*回复|回复.*更多/);
-      if (!expand) return;
-      const before = data.rows.filter((c) => c.target.root === target.root).length;
+      if (!expand) {
+        if (target.parent === target.root) return;
+        break;
+      }
+      const before = data.rows
+        .filter((c) => c.target.root === target.root)
+        .map((c) => c.id)
+        .join('|');
       await expand.click();
       await this.settle(
         p,
         data,
         async () => {
           await this.pageComments(p, data, target.oid);
+          const child =
+            target.parent !== target.root &&
+            data.rows.find((c) => c.id === target.parent && c.target.root === target.root);
+          if (child) {
+            try {
+              await this.rowFor(p, data, target.parent);
+              return true;
+            } catch (e) {
+              if (!(e instanceof PlatformError)) throw e;
+            }
+          }
           return (
-            data.rows.filter((c) => c.target.root === target.root).length > before ||
-            (await root.locator('[data-e2e="comment-item"]').filter({ visible: true }).count()) > 0
+            data.rows
+              .filter((c) => c.target.root === target.root)
+              .map((c) => c.id)
+              .join('|') !== before
           );
         },
-        3500,
+        Math.max(1, Math.min(5000, deadline - Date.now())),
       );
       if (target.parent === target.root) return;
     }
+    if (target.parent === target.root) return;
+    await this.pageComments(p, data, target.oid);
+    const child =
+      target.parent !== target.root &&
+      data.rows.find((c) => c.id === target.parent && c.target.root === target.root);
+    if (child) {
+      await this.rowFor(p, data, target.parent);
+      return;
+    }
+    throw new PlatformError('官网尚未展示指定子回复；已保留原目标，未改发其他楼层。', 'rejected');
   }
   async comments(raw: CommentTarget, page = 1, signal?: AbortSignal, cursor?: string) {
     const t = douyinTarget(raw);
@@ -1238,24 +1321,21 @@ export class DouyinPlatform implements SocialPlatform {
       async (p, data) => {
         await this.commentArea(p, data, t.oid);
         if (t.root !== '0') await this.revealThread(p, data, t);
-        // Pagination remains driven by the official visible comment list, never signed API replay.
-        for (let n = 1; n < page; n++) {
-          const last = p.locator('[data-e2e="comment-item"]').last();
-          if (!(await last.count())) break;
-          const size = data.rows.length;
-          await last.scrollIntoViewIfNeeded();
-          await last.hover();
-          await p.mouse.wheel(0, 650);
-          await this.settle(
+        // Reconstruct the requested cursor after a cold start, without replaying an API request.
+        const deadline = Date.now() + this.timeoutMs();
+        let stalled = 0;
+        for (let step = 0; step < 20 && Date.now() < deadline; step++) {
+          const reachedCursor =
+            !cursor || data.pages.some((x) => x.root === t.root && x.cursor === cursor);
+          if (reachedCursor && step >= page - 1) break;
+          const moved = await this.scrollComments(
             p,
             data,
-            async () => {
-              await this.pageComments(p, data, t.oid);
-              return data.rows.length > size;
-            },
-            3500,
+            t.oid,
+            Math.max(1, Math.min(5000, deadline - Date.now())),
           );
-          if (data.rows.length === size) break;
+          stalled = moved ? 0 : stalled + 1;
+          if (stalled >= 2) break;
         }
         const scope = t.root === '0' ? '0' : t.root;
         const latest = data.pages.filter((x) => x.root === scope).at(-1);
@@ -1441,11 +1521,11 @@ export class DouyinPlatform implements SocialPlatform {
           // Verify in the same authenticated context without destroying the prepared comment page.
           const check = await this.context!.newPage(),
             identity = this.capture(check);
-          check.setDefaultTimeout(6500);
+          check.setDefaultTimeout(this.timeoutMs());
           try {
             await check.goto(ORIGIN + '/user/self', {
               waitUntil: 'domcontentloaded',
-              timeout: 18000,
+              timeout: this.timeoutMs(),
             });
             await this.settle(
               check,
@@ -1458,7 +1538,7 @@ export class DouyinPlatform implements SocialPlatform {
                     validSecUid(identity.self.id) === validSecUid(expectedAccountId)),
                 );
               },
-              12000,
+              this.timeoutMs(),
             );
             if (identity.self?.id !== expectedAccountId)
               throw new PlatformError('抖音发评账号与准备记录不一致，未提交。', 'auth');
@@ -1491,10 +1571,10 @@ export class DouyinPlatform implements SocialPlatform {
               .filter({ visible: true });
             if ((await placeholder.count()) === 1) {
               await placeholder.click();
-              await editors.first().waitFor({ state: 'visible', timeout: 5000 });
+              await editors.first().waitFor({ state: 'visible', timeout: this.timeoutMs() });
             }
           }
-          await editors.first().waitFor({ state: 'visible', timeout: 6500 });
+          await editors.first().waitFor({ state: 'visible', timeout: this.timeoutMs() });
           if ((await editors.count()) !== 1)
             throw new PlatformError('未找到唯一的抖音评论输入框，尚未提交。', 'rejected');
           const editor = editors.first();
@@ -1562,7 +1642,7 @@ export class DouyinPlatform implements SocialPlatform {
                 new URL(r.url()).origin === ORIGIN &&
                 new URL(r.url()).pathname.replace(/\/$/, '') === '/aweme/v1/web/comment/publish' &&
                 r.request().method() === 'POST',
-              { timeout: 12000 },
+              { timeout: this.timeoutMs() },
             )
             .catch(() => undefined);
           try {
@@ -1596,7 +1676,7 @@ export class DouyinPlatform implements SocialPlatform {
         },
         signal,
         false,
-        45000,
+        this.timeoutMs() * 3 + 30000,
         'send',
       );
     } catch (e) {
@@ -1605,7 +1685,11 @@ export class DouyinPlatform implements SocialPlatform {
         !(e instanceof PlatformError && ['auth', 'rejected', 'invalid'].includes(e.kind))
       )
         throw new PlatformError(
-          '尚未点击发送：' + stage + '未完成，请稍后重新读取该楼层。',
+          '尚未点击发送：' +
+            stage +
+            '未完成（网页加载等待上限' +
+            this.timeoutMs() / 1000 +
+            '秒）；可在配置→抖音→连接选项调整，未提交内容。',
           'rejected',
         );
       throw e;
