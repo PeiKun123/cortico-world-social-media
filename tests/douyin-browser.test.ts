@@ -26,6 +26,7 @@ describe.skipIf(!findBrowserExecutable())('Douyin real-browser offline boundarie
       hiddenList?: boolean;
       thread?: boolean;
       slowPanel?: boolean;
+      navigationFailure?: boolean;
       laterThread?: boolean;
       laterCursor?: boolean;
       wrongReply?: boolean;
@@ -78,6 +79,8 @@ describe.skipIf(!findBrowserExecutable())('Douyin real-browser offline boundarie
         await context.route('**/*', async (route) => {
           const path = new URL(route.request().url()).pathname;
           if (route.request().isNavigationRequest()) navigations.push(route.request().url());
+          if (options.navigationFailure && route.request().isNavigationRequest())
+            return route.abort('connectionreset');
           if (options.verification)
             return route.fulfill({
               contentType: 'text/html; charset=utf-8',
@@ -285,6 +288,80 @@ describe.skipIf(!findBrowserExecutable())('Douyin real-browser offline boundarie
       },
     };
   }
+  it('keeps a useful fast network failure after releasing the browser', async () => {
+    const f = await fixture({ navigationFailure: true, releaseAfterTask: true });
+    try {
+      await expect(f.adapter.comments(target)).rejects.toThrow('ERR_CONNECTION_RESET');
+      expect(f.adapter.status()).toMatchObject({
+        running: false,
+        lastFailure: {
+          stage: '打开网页',
+          waitSeconds: 15,
+          reason: expect.stringContaining('ERR_CONNECTION_RESET'),
+        },
+      });
+      expect(f.accepted()).toBe(0);
+    } finally {
+      await f.cleanup();
+    }
+  });
+  it('records browser startup failures without exposing the local profile path', async () => {
+    const f = await fixture();
+    const launch = vi
+      .spyOn(f.adapter as any, 'launch')
+      .mockRejectedValue(new Error('ProcessSingleton: C:/private/user/profile'));
+    try {
+      await expect(f.adapter.comments(target)).rejects.toThrow('登录资料正在被另一个浏览器占用');
+      const state = f.adapter.status();
+      expect((state as any).lastFailure.stage).toBe('启动浏览器');
+      expect(JSON.stringify(state)).not.toContain('C:/private');
+      expect(f.accepted()).toBe(0);
+    } finally {
+      launch.mockRestore();
+      await f.cleanup();
+    }
+  });
+  it('does not replace an immediate pre-submit network cause with a suggestion to increase waiting', async () => {
+    const f = await fixture({ navigationFailure: true, releaseAfterTask: true });
+    try {
+      await expect(f.adapter.send(target, '你好', undefined, '42')).rejects.toThrow(
+        'ERR_CONNECTION_RESET',
+      );
+      expect(f.accepted()).toBe(0);
+    } finally {
+      await f.cleanup();
+    }
+  });
+  it('records a caller cancellation without launching a browser or calling it a page timeout', async () => {
+    const f = await fixture();
+    try {
+      await expect(f.adapter.comments(target, 1, AbortSignal.abort())).rejects.toThrow('上游取消');
+      expect(f.headless()).toBeUndefined();
+      expect(f.adapter.status().lastFailure?.reason).toContain('不是网页加载等待时间到期');
+      expect(f.accepted()).toBe(0);
+    } finally {
+      await f.cleanup();
+    }
+  });
+  it('preserves the last failed navigation after the next successful read', async () => {
+    const f = await fixture();
+    const navigation = vi
+      .spyOn(f.adapter as any, 'launch')
+      .mockRejectedValueOnce(
+        new Error('net::ERR_CONNECTION_RESET at https://private.invalid/?token=hidden'),
+      );
+    try {
+      await expect(f.adapter.comments(target)).rejects.toThrow('ERR_CONNECTION_RESET');
+      const failure = f.adapter.status().lastFailure;
+      await f.adapter.comments(target);
+      expect(f.adapter.status().lastFailure).toEqual(failure);
+      expect(JSON.stringify(f.adapter.status())).not.toContain('token=hidden');
+      expect(f.accepted()).toBe(0);
+    } finally {
+      navigation.mockRestore();
+      await f.cleanup();
+    }
+  });
   it('waits for a slow panel without toggling it shut during loading', async () => {
     const f = await fixture({ slowPanel: true, thread: true, ssr: true });
     try {
@@ -673,7 +750,9 @@ describe.skipIf(!findBrowserExecutable())('Douyin real-browser offline boundarie
     try {
       await expect(f.adapter.send(target, '测试', undefined, '42')).rejects.toMatchObject({
         kind: 'network',
+        message: expect.stringContaining('结果不明'),
       });
+      expect(f.adapter.status().lastFailure?.stage).toBe('等待发送回执');
       expect(f.accepted()).toBe(1);
     } finally {
       await f.cleanup();

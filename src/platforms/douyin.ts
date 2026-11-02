@@ -1,3 +1,4 @@
+import { douyinPageWaitMs, douyinOperationBudgetMs } from '../config.ts';
 import { readDouyinGroup, sendDouyinGroup, type GroupBinding } from './douyin-chat.ts';
 import { browserCacheArgs, clearNetworkCache } from '../resources.ts';
 import { parseFocusAccount } from '../focus.ts';
@@ -133,6 +134,36 @@ interface Capture {
   self?: Account;
   pending: Set<Promise<void>>;
 }
+export interface DouyinFailure {
+  at: string;
+  stage: string;
+  reason: string;
+  elapsedMs: number;
+  waitSeconds: number;
+}
+function browserFailureReason(error: unknown) {
+  if (error instanceof PlatformError) return error.message;
+  const message = error instanceof Error ? error.message : '';
+  const network = message.match(/net::(ERR_[A-Z0-9_]{1,80})/);
+  if (network)
+    return (
+      '网页连接失败（' + network[1] + '）；这不是加载等待时间到期。请检查该浏览器的网络与代理状态。'
+    );
+  if (/ProcessSingleton|profile.*(?:in use|locked)|user data directory.*in use/i.test(message))
+    return '登录资料正在被另一个浏览器占用，未自动删除或重置登录资料；请先关闭同一独立登录窗口再试。';
+  if (/Target.*closed|browser has been closed|context.*closed/i.test(message))
+    return '浏览器页面或进程被关闭；不能仅凭此判断是超时，请核对是否手动关闭或被其他程序终止。';
+  if (/EACCES|EPERM|access.*denied/i.test(message))
+    return '浏览器启动或文件访问被系统拒绝；请检查程序路径和本机权限，不要关闭安全保护。';
+  if (/ENOENT|executable.*(?:doesn.t exist|not found)/i.test(message))
+    return '未找到配置的浏览器程序，请在连接选项核对程序路径。';
+  if (
+    (error instanceof Error && error.name === 'TimeoutError') ||
+    /Timeout \d+ms exceeded/.test(message)
+  )
+    return '页面等待到达上限；慢网络可在连接选项调整加载等待时间。';
+  return '网页操作未完成，原因未能分类；请复制最近失败信息反馈，未输出本机路径或登录资料。';
+}
 /** Only the official page makes requests; this adapter does not forge signatures or bypass verification. */
 export class DouyinPlatform implements SocialPlatform {
   readonly id = 'douyin';
@@ -152,6 +183,8 @@ export class DouyinPlatform implements SocialPlatform {
   private stopped = false;
   private lastFeedId?: string;
   private feedUrl?: string;
+  private operationStage = '准备操作';
+  private lastFailure?: DouyinFailure;
   private detail = '实验接入：视频与评论通过独立Edge读取；发评需登录验收。';
   constructor(
     private profileDir: string,
@@ -166,8 +199,7 @@ export class DouyinPlatform implements SocialPlatform {
     private pageWaitSeconds: () => number = () => 45,
   ) {}
   private timeoutMs() {
-    const value = this.pageWaitSeconds();
-    return (Number.isFinite(value) ? Math.max(15, Math.min(120, value)) : 45) * 1000;
+    return douyinPageWaitMs(this.pageWaitSeconds());
   }
   status() {
     return {
@@ -190,6 +222,7 @@ export class DouyinPlatform implements SocialPlatform {
             ? 'compatible'
             : 'windowless',
       detail: this.detail,
+      lastFailure: this.lastFailure ? { ...this.lastFailure } : undefined,
       capabilities: {
         read: true,
         search: true,
@@ -415,41 +448,45 @@ export class DouyinPlatform implements SocialPlatform {
     action: (page: Page, data: Capture) => Promise<T>,
     signal?: AbortSignal,
     visible = false,
-    budgetMs = this.timeoutMs() * 3 + 30000,
+    budgetMs = douyinOperationBudgetMs(this.pageWaitSeconds()),
     kind: 'main' | 'chat' | 'send' = 'main',
   ): Promise<T> {
     return this.serial(async () => {
-      if (this.loginOpen)
-        throw new PlatformError('独立Edge正在等待你登录；登录后在配置页点“完成抖音登录”。', 'auth');
-      if (this.idleTimer) clearTimeout(this.idleTimer);
+      const started = Date.now();
       const budget = AbortSignal.timeout(budgetMs),
         combined = signal ? AbortSignal.any([signal, budget]) : budget;
-      combined.throwIfAborted();
-      const ctx = await this.launch(visible);
-      let p: Page;
-      if (kind === 'chat') {
-        if (!this.chatPage || this.chatPage.isClosed()) this.chatPage = await ctx.newPage();
-        p = this.chatPage;
-        if (!this.background()) await p.bringToFront();
-      } else {
-        p = kind === 'send' ? await ctx.newPage() : ctx.pages()[0] || (await ctx.newPage());
-        await this.guardCommentPage(p);
-      }
-      if (combined.aborted) {
-        await ctx.close().catch(() => {});
-        combined.throwIfAborted();
-      }
-      p.setDefaultTimeout(this.timeoutMs());
-      let data = this.pageData.get(p);
-      if (!data) {
-        data = this.capture(p);
-        this.pageData.set(p, data);
-      }
+      let ctx: BrowserContext | undefined, p: Page | undefined;
       const abort = () => {
-        void ctx.close().catch(() => {});
+        void ctx?.close().catch(() => {});
       };
       combined.addEventListener('abort', abort, { once: true });
+      this.operationStage = '启动浏览器';
       try {
+        combined.throwIfAborted();
+        if (this.loginOpen)
+          throw new PlatformError(
+            '独立Edge正在等待你登录；登录后在配置页点“完成抖音登录”。',
+            'auth',
+          );
+        if (this.idleTimer) clearTimeout(this.idleTimer);
+        ctx = await this.launch(visible);
+        this.operationStage = '创建页面';
+        if (kind === 'chat') {
+          if (!this.chatPage || this.chatPage.isClosed()) this.chatPage = await ctx.newPage();
+          p = this.chatPage;
+          if (!this.background()) await p.bringToFront();
+        } else {
+          p = kind === 'send' ? await ctx.newPage() : ctx.pages()[0] || (await ctx.newPage());
+          await this.guardCommentPage(p);
+        }
+        combined.throwIfAborted();
+        p.setDefaultTimeout(this.timeoutMs());
+        let data = this.pageData.get(p);
+        if (!data) {
+          data = this.capture(p);
+          this.pageData.set(p, data);
+        }
+        this.operationStage = '打开网页';
         if (p.url() !== url || url === ORIGIN + '/user/self') {
           data.creators.clear();
           data.videos.clear();
@@ -461,34 +498,45 @@ export class DouyinPlatform implements SocialPlatform {
         if (new URL(p.url()).origin !== ORIGIN)
           throw new PlatformError('官网跳转到了未支持的地址，停止本次操作。', 'rejected');
         await this.checkPageBlock(p);
+        this.operationStage = kind === 'chat' ? '读取群聊' : '读取网页';
         const result = await action(p, data);
         combined.throwIfAborted();
         return result;
-      } catch (e) {
-        this.detail =
-          e instanceof PlatformError
-            ? e.message
-            : '抖音网页未完成操作；请检查独立浏览器的登录或验证提示。';
-        if (combined.aborted)
-          throw new PlatformError('抖音操作已取消或超时；不会无限等待。', 'network');
-        if (e instanceof PlatformError) throw e;
+      } catch (error) {
+        this.detail = combined.aborted
+          ? signal?.aborted
+            ? '本次任务被上游取消；这不是网页加载等待时间到期。'
+            : '本次操作达到总等待上限，已停止；不会无限等待。'
+          : browserFailureReason(error);
+        this.lastFailure = {
+          at: new Date().toISOString(),
+          stage: this.operationStage,
+          reason: this.detail,
+          elapsedMs: Math.max(0, Date.now() - started),
+          waitSeconds: this.timeoutMs() / 1000,
+        };
+        if (!combined.aborted && error instanceof PlatformError) throw error;
         throw new PlatformError(this.detail, 'network');
       } finally {
         combined.removeEventListener('abort', abort);
-        if (kind === 'send' && !p.isClosed()) await p.close().catch(() => {});
-        if (this.releaseAfterTask() || combined.aborted || this.stopped || !this.enabled())
-          await ctx.close().catch(() => {});
-        else if (this.groupListening()) {
-          for (const tab of ctx.pages())
-            await tab
-              .locator('video,audio')
-              .evaluateAll((nodes) => nodes.forEach((n) => (n as HTMLMediaElement).pause()))
-              .catch(() => {});
-        } else if (!this.groupListening()) {
-          this.idleTimer = setTimeout(() => {
-            if (this.context === ctx && !this.loginOpen) void ctx.close().catch(() => {});
-          }, 30000);
-          this.idleTimer.unref();
+        if (kind === 'send' && p && !p.isClosed()) await p.close().catch(() => {});
+        if (ctx) {
+          if (this.releaseAfterTask() || combined.aborted || this.stopped || !this.enabled())
+            await ctx.close().catch(() => {});
+          else if (this.groupListening()) {
+            for (const tab of ctx.pages())
+              await tab
+                .locator('video,audio')
+                .evaluateAll((nodes) => nodes.forEach((n) => (n as HTMLMediaElement).pause()))
+                .catch(() => {});
+          } else {
+            const ownedContext = ctx;
+            this.idleTimer = setTimeout(() => {
+              if (this.context === ownedContext && !this.loginOpen)
+                void ownedContext.close().catch(() => {});
+            }, 30000);
+            this.idleTimer.unref();
+          }
         }
       }
     });
@@ -1098,6 +1146,7 @@ export class DouyinPlatform implements SocialPlatform {
     return data.rows.some((c) => c.target.oid === id);
   }
   private async commentArea(p: Page, data: Capture, id: string, refresh = true): Promise<void> {
+    this.operationStage = '加载评论区';
     await this.settle(
       p,
       data,
@@ -1224,6 +1273,7 @@ export class DouyinPlatform implements SocialPlatform {
     }
   }
   private async revealThread(p: Page, data: Capture, target: CommentTarget) {
+    this.operationStage = '展开指定楼层';
     const deadline = Date.now() + this.timeoutMs();
     let root: Locator | undefined,
       stalled = 0;
@@ -1513,11 +1563,12 @@ export class DouyinPlatform implements SocialPlatform {
       throw new PlatformError('评论内容应为1–1000字。', 'rejected');
     if (!expectedAccountId) throw new PlatformError('尚未核对抖音账号，未提交。', 'auth');
     let sendClicked = false;
-    let stage = '核对账号';
+    let stage = (this.operationStage = '核对账号');
     try {
       return await this.visit(
         playerUrl(t.oid),
         async (p, data) => {
+          this.operationStage = stage;
           // Verify in the same authenticated context without destroying the prepared comment page.
           const check = await this.context!.newPage(),
             identity = this.capture(check);
@@ -1545,10 +1596,10 @@ export class DouyinPlatform implements SocialPlatform {
           } finally {
             await check.close().catch(() => {});
           }
-          stage = '加载评论区';
+          stage = this.operationStage = '加载评论区';
           await this.commentArea(p, data, t.oid);
           if (t.root !== '0') {
-            stage = '展开指定楼层';
+            stage = this.operationStage = '展开指定楼层';
             await this.revealThread(p, data, t);
             const observed = data.rows.find((c) => c.id === t.parent);
             if (observed?.target.root !== t.root)
@@ -1560,10 +1611,10 @@ export class DouyinPlatform implements SocialPlatform {
               reply = await this.ownAction(row, t.parent, '回复');
             if (!reply)
               throw new PlatformError('这条评论的回复入口暂未显示，未改发其他位置。', 'rejected');
-            stage = '打开子回复输入框';
+            stage = this.operationStage = '打开子回复输入框';
             await reply.click();
           }
-          stage = '填写评论';
+          stage = this.operationStage = '填写评论';
           const editors = p.locator('[contenteditable="true"]:visible');
           if (!(await editors.count())) {
             const placeholder = p
@@ -1646,8 +1697,10 @@ export class DouyinPlatform implements SocialPlatform {
             )
             .catch(() => undefined);
           try {
+            stage = this.operationStage = '点击发送';
             sendClicked = true;
             await send.click();
+            stage = this.operationStage = '等待发送回执';
             const result = await Promise.race([response, rejectedRequest]);
             if (blocked)
               throw new PlatformError('提交的目标或文字与准备记录不一致，已阻止提交。', 'rejected');
@@ -1667,7 +1720,7 @@ export class DouyinPlatform implements SocialPlatform {
             return { receiptId, transport: 'browser' };
           } catch (e) {
             if (submitted && !(e instanceof PlatformError))
-              throw new Error('抖音发送结果不明；请核对原记录，禁止自动重发。');
+              throw new PlatformError('抖音发送结果不明；请核对原记录，禁止自动重发。', 'network');
             throw e;
           } finally {
             this.allowedRequest = undefined;
@@ -1676,7 +1729,7 @@ export class DouyinPlatform implements SocialPlatform {
         },
         signal,
         false,
-        this.timeoutMs() * 3 + 30000,
+        douyinOperationBudgetMs(this.pageWaitSeconds()),
         'send',
       );
     } catch (e) {
@@ -1686,10 +1739,10 @@ export class DouyinPlatform implements SocialPlatform {
       )
         throw new PlatformError(
           '尚未点击发送：' +
-            stage +
-            '未完成（网页加载等待上限' +
-            this.timeoutMs() / 1000 +
-            '秒）；可在配置→抖音→连接选项调整，未提交内容。',
+            (this.lastFailure?.stage ?? stage) +
+            '未完成；' +
+            browserFailureReason(e) +
+            ' 未提交内容。',
           'rejected',
         );
       throw e;

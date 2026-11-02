@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { SocialService } from '../src/service.ts';
 import { SocialStore } from '../src/store.ts';
 import { SOCIALMEDIA_DEFAULTS } from '../src/config.ts';
@@ -1260,3 +1260,44 @@ it('requires a saved focus brief and enforces UID, explicit API transport and me
     }),
   ).rejects.toThrow(/绑定/);
 });
+
+it.each([
+  [15, 75000],
+  [120, 390000],
+])(
+  'keeps recipient lookup within the configured Douyin operation budget (%s seconds)',
+  async (seconds, expected) => {
+    const x = setup();
+    x.cfg.platforms.douyin.enabled = true;
+    x.cfg.platforms.douyin.posting.enabled = true;
+    x.cfg.douyinBrowser!.pageWaitSeconds = seconds;
+    const t = { oid: '99', type: 2, root: '100', parent: '102' };
+    const comments = vi.fn(async () => ({
+      items: [{ id: '102', author: '朋友', authorId: '8', text: '你好', target: t }],
+    }));
+    const adapter: SocialPlatform = {
+      ...x.adapter,
+      id: 'douyin',
+      normalizeTarget: (v) => v as typeof t,
+      comments,
+    };
+    const service = new SocialService(x.cfg, x.store, new Map([['douyin', adapter]]));
+    await service.connect('douyin');
+    const timeouts = vi
+      .spyOn(AbortSignal, 'timeout')
+      .mockImplementation(() => new AbortController().signal);
+    try {
+      const result = await service.publish({
+        platform: 'douyin',
+        requestId: 'recipient-wait',
+        text: '你好呀',
+        target: t,
+      });
+      expect(comments).toHaveBeenCalledOnce();
+      expect(result.status).toBe('sent');
+      expect(timeouts).toHaveBeenCalledWith(expected);
+    } finally {
+      timeouts.mockRestore();
+    }
+  },
+);

@@ -1345,3 +1345,103 @@ it('records a comment read check without treating an empty list as proven commen
     }).find((r) => r.key === 'read')?.state,
   ).toBe('pending');
 });
+
+it('keeps the last Douyin failure collapsed, literal and copyable after a successful status poll', async () => {
+  const root = document.createElement('div');
+  document.body.append(root);
+  const controller = new AbortController();
+  const refreshers: Array<() => void> = [];
+  const copied: string[] = [];
+  const previous = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+  Object.defineProperty(navigator, 'clipboard', {
+    configurable: true,
+    value: {
+      writeText: async (t: string) => {
+        copied.push(t);
+      },
+    },
+  });
+  const state: any = {
+    config: structuredClone(SOCIALMEDIA_DEFAULTS),
+    platforms: [
+      { id: 'douyin', enabled: true, posting: true, account: { id: '42', name: '测试' } },
+    ],
+    inbox: [],
+    outbox: [],
+    pending: 0,
+    unknown: 0,
+    douyin: {
+      running: false,
+      loginOpen: false,
+      detail: '随后读取已成功',
+      lastFailure: {
+        at: '2026-11-03T00:00:00Z',
+        stage: '打开网页',
+        reason: 'ERR_CONNECTION_RESET <img src=x onerror=alert(1)>',
+        elapsedMs: 1544,
+        waitSeconds: 120,
+      },
+    },
+  };
+  mountSettings({
+    root,
+    signal: controller.signal,
+    invoke: async () => structuredClone(state),
+    interval: (fn: () => void) => {
+      refreshers.push(fn);
+      return { dispose() {} };
+    },
+  } as unknown as WebUiPanelContext);
+  try {
+    await new Promise((r) => setTimeout(r, 0));
+    const box = root.querySelector<HTMLDetailsElement>(
+      '.sm-platform-card[data-platform=douyin] .sm-browser-failure',
+    )!;
+    expect(box).not.toBeNull();
+    expect(box.hidden).toBe(false);
+    expect(box.open).toBe(false);
+    expect(box.textContent).toContain('ERR_CONNECTION_RESET <img');
+    expect(box.querySelector('img')).toBeNull();
+    box.open = true;
+    [...box.querySelectorAll('button')].find((b) => b.textContent === '复制失败信息')!.click();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(copied[0]).toContain('耗时：1.5秒');
+    expect(copied[0]).toContain('加载等待上限：120秒');
+    state.douyin.running = true;
+    state.douyin.detail = '已读取官网提供的评论';
+    refreshers.forEach((fn) => fn());
+    await new Promise((r) => setTimeout(r, 0));
+    expect(box.textContent).toContain('ERR_CONNECTION_RESET');
+    expect(box.open).toBe(true);
+  } finally {
+    controller.abort();
+    root.remove();
+    if (previous) Object.defineProperty(navigator, 'clipboard', previous);
+    else delete (navigator as any).clipboard;
+  }
+});
+it('does not show an empty browser-failure panel before any failure', async () => {
+  const root = document.createElement('div');
+  document.body.append(root);
+  const c = new AbortController();
+  mountSettings({
+    root,
+    signal: c.signal,
+    invoke: async () => ({
+      config: structuredClone(SOCIALMEDIA_DEFAULTS),
+      platforms: [],
+      inbox: [],
+      outbox: [],
+      pending: 0,
+      unknown: 0,
+    }),
+    interval: () => ({ dispose() {} }),
+  } as unknown as WebUiPanelContext);
+  try {
+    await new Promise((r) => setTimeout(r, 0));
+    expect(root.querySelector<HTMLElement>('.sm-browser-failure')?.hidden).toBe(true);
+  } finally {
+    c.abort();
+    root.remove();
+  }
+});

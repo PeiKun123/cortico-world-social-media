@@ -1,3 +1,4 @@
+import type { DouyinFailure } from '../platforms/douyin.ts';
 import type { GroupChats } from '../group-chat.ts';
 import type { DynamicPost } from '../dynamic-publishing.ts';
 import type { PublicDynamic } from '../platforms/bilibili-dynamics.ts';
@@ -52,7 +53,7 @@ interface Snapshot {
   videos?: PublicVideo[];
   comments?: PublicComment[];
   stats?: { sent: number; unconfirmed: number };
-  douyin?: { running: boolean; loginOpen: boolean; detail: string };
+  douyin?: { running: boolean; loginOpen: boolean; detail: string; lastFailure?: DouyinFailure };
   credentialSaved: boolean;
   publishing?: {
     transport: string;
@@ -541,6 +542,33 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
     );
     const status = el('p', '尚未检查' + title + '连接', 'sm-summary');
     status.setAttribute('aria-live', 'polite');
+    const failureBox = fold('最近一次失败', 'sm-subsection sm-browser-failure');
+    failureBox.hidden = true;
+    const failureReport = el('pre', undefined, 'sm-failure-report');
+    const copyStatus = el('small', '', 'sm-muted');
+    copyStatus.setAttribute('aria-live', 'polite');
+    failureBox.append(failureReport);
+    button(
+      '复制失败信息',
+      async () => {
+        try {
+          if (!navigator.clipboard?.writeText) throw Error('Clipboard unavailable');
+          await navigator.clipboard.writeText(failureReport.textContent ?? '');
+          copyStatus.textContent = '已复制；不包含登录资料和本机路径。';
+        } catch {
+          copyStatus.textContent = '未能自动复制，可选中上方文字手动复制。';
+        }
+      },
+      failureBox,
+    );
+    failureBox.append(
+      copyStatus,
+      el(
+        'p',
+        '等待设置是上限，不是窗口最短停留时间。这里保留最近失败，后续读取成功也不会抹掉；重启后重新记录。',
+        'sm-muted',
+      ),
+    );
     const input = el('input');
     input.type = 'url';
     input.placeholder = '粘贴' + title + '完整作品链接或作品编号';
@@ -604,7 +632,7 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
     }
     const switches = el('div', undefined, 'sm-controls');
     switches.append(enabled.parentElement!, posting.parentElement!);
-    section.append(status, switches, buttons, usageChecks(id), checks, loginGuide(id));
+    section.append(status, switches, buttons, usageChecks(id), checks, failureBox, loginGuide(id));
     return {
       section,
       status,
@@ -612,6 +640,22 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
       enabled,
       posting,
       render(state: Snapshot) {
+        const failure = id === 'douyin' ? state.douyin?.lastFailure : undefined;
+        failureBox.hidden = !failure;
+        if (failure) {
+          const report = [
+            title + '最近失败',
+            '时间：' + prettyTime(failure.at),
+            '环节：' + failure.stage,
+            '原因：' + failure.reason,
+            '耗时：' + (Math.max(0, failure.elapsedMs) / 1000).toFixed(1) + '秒',
+            '加载等待上限：' + failure.waitSeconds + '秒',
+          ].join('\n');
+          if (failureReport.textContent !== report) {
+            failureReport.textContent = report;
+            copyStatus.textContent = '';
+          }
+        }
         const p = state.platforms.find((p) => p.id === id);
         enabled.checked = p?.enabled ?? state.config?.platforms[id]?.enabled ?? false;
         posting.checked = p?.posting ?? state.config?.platforms[id]?.posting.enabled ?? false;

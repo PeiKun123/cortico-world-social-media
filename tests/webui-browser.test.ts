@@ -270,6 +270,50 @@ describe.skipIf(!findBrowserExecutable())('timeline in a real browser', () => {
       await page.close();
     }
   });
+  it('shows a retained Douyin failure in a collapsed platform card without narrow-screen overflow', async () => {
+    const page = await fixture(420, true);
+    try {
+      await page.evaluate(() => {
+        const w = window as any;
+        w.testState.douyin = {
+          running: false,
+          loginOpen: false,
+          detail: '随后读取成功',
+          lastFailure: {
+            at: '2026-11-03T00:00:00Z',
+            stage: '打开网页',
+            reason: '连接失败 ERR_CONNECTION_RESET ' + 'x'.repeat(180),
+            elapsedMs: 1400,
+            waitSeconds: 120,
+          },
+        };
+        w.refreshers.forEach((fn: () => void) => fn());
+      });
+      await page.getByRole('tab', { name: '抖音', exact: true }).click();
+      const box = page.locator('.sm-platform-card[data-platform=douyin] .sm-browser-failure');
+      await box.waitFor();
+      expect(await box.evaluate((n) => (n as HTMLDetailsElement).open)).toBe(false);
+      await box.locator(':scope > summary').click();
+      expect(await box.innerText()).toContain('耗时：1.4秒');
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
+        true,
+      );
+      await page.evaluate(() => {
+        Object.defineProperty(navigator, 'clipboard', { configurable: true, value: undefined });
+      });
+      await box.getByRole('button', { name: '复制失败信息', exact: true }).click();
+      await page.getByText('未能自动复制，可选中上方文字手动复制。', { exact: true }).waitFor();
+      await page.evaluate(() => {
+        const w = window as any;
+        w.testState.douyin.detail = '已读取官网评论';
+        w.refreshers.forEach((fn: () => void) => fn());
+      });
+      expect(await box.innerText()).toContain('ERR_CONNECTION_RESET');
+      expect(await box.evaluate((n) => (n as HTMLDetailsElement).open)).toBe(true);
+    } finally {
+      await page.close();
+    }
+  });
   it('loads archived sends into the existing per-video timeline on demand', async () => {
     const page = await fixture(1100);
     try {

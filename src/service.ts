@@ -1,6 +1,6 @@
 import { judgeParticipation } from './judgment.ts';
 import { assessPublicInput, PublicReplySkipped } from './safety.ts';
-import { MAX_REPLIES_PER_PERSON } from './config.ts';
+import { MAX_REPLIES_PER_PERSON, douyinOperationBudgetMs } from './config.ts';
 import { OwnerFocus } from './focus.ts';
 import { Roaming } from './roaming.ts';
 import {
@@ -669,7 +669,13 @@ export class SocialService {
       const item = input.inboxId ? this.store.getInbox(input.inboxId) : undefined;
       let parent = this.store.comment(target);
       if (!item?.authorId && !parent?.authorId) {
-        const timeout = AbortSignal.timeout(input.platform !== 'bilibili' ? 20000 : 8000);
+        const timeout = AbortSignal.timeout(
+          input.platform === 'douyin'
+            ? douyinOperationBudgetMs(this.cfg.douyinBrowser?.pageWaitSeconds)
+            : input.platform !== 'bilibili'
+              ? 20000
+              : 8000,
+        );
         this.store.rememberComments(
           await adapter.comments(
             { ...target, parent: target.root },

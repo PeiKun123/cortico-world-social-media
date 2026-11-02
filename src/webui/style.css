@@ -536,7 +536,7 @@
     flex-direction: column;
   }
   .socialmedia-desk .sm-video-side {
-  margin-left: auto;
+    margin-left: auto;
     flex-direction: row;
     width: 100%;
     justify-content: space-between;
@@ -1055,4 +1055,14 @@
   .socialmedia-desk .sm-fold-status {
     max-width: 65%;
   }
+}
+
+.socialmedia-desk .sm-failure-report {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  font: inherit;
+  line-height: 1.7;
+  margin: 12px 0;
+  user-select: text;
 }

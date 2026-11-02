@@ -132,6 +132,12 @@ export interface SocialMediaConfigSection {
   };
   kuaishouBrowser?: { executableFile: string; background: boolean };
 }
+export function douyinPageWaitMs(seconds?: number) {
+  return (Number.isFinite(seconds) ? Math.max(15, Math.min(120, seconds!)) : 45) * 1000;
+}
+export function douyinOperationBudgetMs(seconds?: number) {
+  return douyinPageWaitMs(seconds) * 3 + 30000;
+}
 export const SOCIALMEDIA_SECRET = 'SOCIALMEDIA_BILIBILI_COOKIE';
 export const SOCIALMEDIA_DEFAULTS: SocialMediaConfigSection = {
   enabled: false,
