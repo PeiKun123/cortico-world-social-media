@@ -49,7 +49,7 @@
 
 **B 站**是日常使用的主平台。**抖音和快手**为实验接入，读取与发言范围取决于平台和作品类型。公开发言由各平台独立授权，平台受理后还可单独核对访客可见性。
 
-<details>
+<details open>
 <summary>看界面示例</summary>
 
 ![按作品归档的互动记录界面](https://raw.githubusercontent.com/PeiKun123/cortico-world-social-media/main/assets/timeline.png)
@@ -58,7 +58,7 @@
 
 </details>
 
-<details>
+<details open>
 <summary>查看完整平台能力、账号设置与排查说明</summary>
 
 ## 平台能力速查
