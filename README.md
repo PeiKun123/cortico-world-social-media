@@ -16,6 +16,8 @@
 
 ## 语感练习
 
+![戴金丝眼镜的 Gemini 老师指着写有「说人话」的黑板，小鲸鱼坐在课桌前举手](https://raw.githubusercontent.com/PeiKun123/cortico-world-social-media/main/docs/gemini-classroom.jpg)
+
 配置页底部的「实验功能」有两个独立开关，默认关闭。
 
 | 功能 | 小鲸鱼怎么练 |
