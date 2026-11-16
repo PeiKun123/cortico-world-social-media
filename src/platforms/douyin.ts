@@ -1,6 +1,8 @@
+import { hideOwnedBrowserWindows } from './windows-browser.ts';
 import { douyinPageWaitMs, douyinOperationBudgetMs } from '../config.ts';
 import { readDouyinGroup, sendDouyinGroup, type GroupBinding } from './douyin-chat.ts';
 import { browserCacheArgs, clearNetworkCache } from '../resources.ts';
+import { MAX_VIDEO_FRAMES } from '../resource-policy.ts';
 import { parseFocusAccount } from '../focus.ts';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
@@ -45,7 +47,7 @@ export function douyinVideoId(input: string): string {
   }
   if (url.origin !== ORIGIN || url.username || url.password)
     throw new PlatformError('仅接受 HTTPS 抖音官网视频链接；短链请先展开。');
-  const match = /^\/video\/([1-9]\d{0,23})\/?$/.exec(url.pathname);
+  const match = /^\/(?:video|note)\/([1-9]\d{0,23})\/?$/.exec(url.pathname);
   if (match) return match[1];
   if (['/jingxuan', '/'].includes(url.pathname) && url.searchParams.has('modal_id'))
     return numericId(url.searchParams.get('modal_id'));
@@ -65,12 +67,29 @@ export function douyinTarget(raw: unknown): CommentTarget {
     throw new PlatformError('回复须同时提供原楼与目标评论编号。');
   return target;
 }
+export function douyinImageUrls(v: Json): Array<string | null> {
+  return Array.isArray(v.images) ? v.images.slice(0, 100).map((image: Json) => {
+    const variants = image?.url_list;
+    if (!Array.isArray(variants)) return null;
+    for (const value of variants.slice(0, 8)) {
+      if (typeof value !== 'string' || value.length > 4000) continue;
+      try {
+        const url = new URL(value);
+        if (url.protocol === 'https:' && !url.port && !url.username && !url.password &&
+            /(^|\.)douyinpic\.com$/i.test(url.hostname)) return url.href;
+      } catch { /* Ignore invalid or unexpected destinations. */ }
+    }
+    return null;
+  }) : [];
+}
 export function mapDouyinVideo(v: Json): Video {
   const id = numericId(v.aweme_id);
+  const imageCount = Array.isArray(v.images) ? Math.min(v.images.length, 100) : 0;
   const duration = Number(v.video?.duration ?? v.duration) / 1000;
   return {
     id,
-    kind: Array.isArray(v.images) && v.images.length ? 'images' : 'video',
+    kind: imageCount ? 'images' : 'video',
+    ...(imageCount ? { imageCount } : {}),
     aid: id,
     cid: id,
     title: String(v.desc ?? '').slice(0, 200),
@@ -78,7 +97,7 @@ export function mapDouyinVideo(v: Json): Video {
     ownerId: validSecUid(v.author?.sec_uid) ? v.author.sec_uid : undefined,
     publishedAt: Number.isFinite(Number(v.create_time)) ? Number(v.create_time) : undefined,
     author: String(v.author?.nickname ?? '').slice(0, 80),
-    durationSec: Number.isFinite(duration) ? Math.max(0, duration) : 0,
+    durationSec: !imageCount && Number.isFinite(duration) ? Math.max(0, duration) : 0,
     cover: '',
     url: ORIGIN + '/video/' + id,
     parts: [],
@@ -104,14 +123,19 @@ export function mapDouyinComment(v: Json, videoId: string, root?: string): Publi
     },
   };
 }
+function douyinPublishMismatch(form: URLSearchParams, target: CommentTarget, text: string) {
+  if (form.get('aweme_id') !== target.oid) return '作品编号';
+  if (
+    (form.get('reply_id') || '0') !== target.root ||
+    (form.get('reply_to_reply_id') || '0') !== (target.parent === target.root ? '0' : target.parent)
+  ) {
+    return '回复楼层';
+  }
+  if (form.get('text') !== text) return '评论正文';
+}
+
 export function matchesDouyinPublish(form: URLSearchParams, raw: CommentTarget, text: string) {
-  const t = douyinTarget(raw);
-  return (
-    form.get('aweme_id') === t.oid &&
-    form.get('text') === text &&
-    (form.get('reply_id') || '0') === t.root &&
-    (form.get('reply_to_reply_id') || '0') === (t.parent === t.root ? '0' : t.parent)
-  );
+  return !douyinPublishMismatch(form, douyinTarget(raw), text);
 }
 function edgeExecutable(configured: string) {
   if (configured) return findBrowserExecutable(configured);
@@ -129,10 +153,17 @@ function edgeExecutable(configured: string) {
 interface Capture {
   creators: Map<string, Account & { handle: string }>;
   videos: Map<string, Video>;
+  galleryUrls: Map<string, Array<string | null>>;
   rows: PublicComment[];
   pages: Array<{ cursor: string; next: string; more: boolean; root: string }>;
   self?: Account;
   pending: Set<Promise<void>>;
+}
+export interface DouyinVerification {
+  paused: boolean;
+  at: string;
+  pageTitle: string;
+  browserMode: 'visible' | 'compatible' | 'windowless';
 }
 export interface DouyinFailure {
   at: string;
@@ -170,6 +201,10 @@ export class DouyinPlatform implements SocialPlatform {
   readonly normalizeTarget = douyinTarget;
   readonly validRecipientId = validSecUid; // Use the same public sec_uid in DOM and API modes for the per-person limit.
   private context?: BrowserContext;
+  private hiddenPages = new WeakSet<Page>();
+  private hiding = new WeakMap<BrowserContext, Promise<void>>();
+  private hideFailed = new WeakSet<BrowserContext>();
+  private windowHideState: 'off' | 'hidden' | 'failed' = 'off';
   private pageData = new WeakMap<Page, Capture>();
   private commentGuardedPages = new WeakSet<Page>();
   private chatPage?: Page;
@@ -185,6 +220,9 @@ export class DouyinPlatform implements SocialPlatform {
   private feedUrl?: string;
   private operationStage = '准备操作';
   private lastFailure?: DouyinFailure;
+  private verification?: DouyinVerification;
+  private verificationReturnUrl?: string;
+  private requestedPages = new WeakMap<Page, string>();
   private detail = '实验接入：视频与评论通过独立Edge读取；发评需登录验收。';
   constructor(
     private profileDir: string,
@@ -197,6 +235,7 @@ export class DouyinPlatform implements SocialPlatform {
     private releaseAfterTask: () => boolean = () => true,
     private compatibilityWindow: () => boolean = () => false,
     private pageWaitSeconds: () => number = () => 45,
+    private hideCompatibilityWindow: () => boolean = () => false,
   ) {}
   private timeoutMs() {
     return douyinPageWaitMs(this.pageWaitSeconds());
@@ -215,6 +254,15 @@ export class DouyinPlatform implements SocialPlatform {
       runtimeNote:
         '后台任务默认结束即退出浏览器，登录资料保留；群聊按间隔重新启动读取。可关闭立即释放以保留连接。登录窗口仅由配置页主动打开。running=false不是启动失败。',
       loginOpen: this.loginOpen,
+      windowHiding: {
+        enabled: this.hideCompatibilityWindow(),
+        state: this.windowHideState,
+        active: !!this.context && !this.loginOpen && this.windowHideState === 'hidden',
+        detail:
+          this.windowHideState === 'failed'
+            ? '隐藏未成功，已回退屏幕外兼容窗口；可关闭隐藏选项。'
+            : undefined,
+      },
       browserMode:
         this.loginOpen || !this.background()
           ? 'visible'
@@ -223,6 +271,7 @@ export class DouyinPlatform implements SocialPlatform {
             : 'windowless',
       detail: this.detail,
       lastFailure: this.lastFailure ? { ...this.lastFailure } : undefined,
+      verification: this.verification ? { ...this.verification } : undefined,
       capabilities: {
         read: true,
         search: true,
@@ -236,6 +285,28 @@ export class DouyinPlatform implements SocialPlatform {
       },
     };
   }
+  // Only explicit local checks or a changed browser mode resume after a challenge.
+  resumeVerificationChecks() {
+    if (this.verification) this.verification.paused = false;
+  }
+  private verificationUrl(input?: string) {
+    try {
+      const u = new URL(input ?? ORIGIN + '/jingxuan');
+      if (u.origin !== ORIGIN) return ORIGIN + '/jingxuan';
+      if (u.pathname === '/jingxuan' || u.pathname === '/') {
+        const id = u.searchParams.get('modal_id');
+        return id && /^[1-9][0-9]{0,29}$/.test(id) ? playerUrl(id) : ORIGIN + u.pathname;
+      }
+      if (
+        /^\/(?:video|note)\/[1-9][0-9]{0,29}\/?$/.test(u.pathname) ||
+        /^\/user\/MS4w[A-Za-z0-9_.-]{10,200}\/?$/.test(u.pathname) ||
+        u.pathname === '/user/self' ||
+        u.pathname === '/im'
+      )
+        return ORIGIN + u.pathname;
+    } catch {}
+    return ORIGIN + '/jingxuan';
+  }
   reset() {
     this.stopped = false;
   }
@@ -243,6 +314,42 @@ export class DouyinPlatform implements SocialPlatform {
     const result = this.queue.then(action, action);
     this.queue = result.catch(() => {});
     return result;
+  }
+  private async hideCompatibleContext(context: BrowserContext): Promise<void> {
+    if (
+      !this.hideCompatibilityWindow() ||
+      this.loginOpen ||
+      !this.background() ||
+      !this.compatibilityWindow() ||
+      this.context !== context ||
+      this.hideFailed.has(context) ||
+      (context.pages().length && context.pages().every((p) => this.hiddenPages.has(p)))
+    )
+      return;
+    const pending = this.hiding.get(context);
+    if (pending) {
+      await pending;
+      return this.hideCompatibleContext(context);
+    }
+    const work = (async () => {
+      try {
+        const pages = context.pages();
+        await hideOwnedBrowserWindows(context);
+        pages.forEach((p) => this.hiddenPages.add(p));
+        this.windowHideState = 'hidden';
+      } catch {
+        if (this.context === context) {
+          this.hideFailed.add(context);
+          this.windowHideState = 'failed';
+        }
+      }
+    })();
+    this.hiding.set(context, work);
+    try {
+      await work;
+    } finally {
+      this.hiding.delete(context);
+    }
   }
   private async launch(visible = false) {
     if (this.stopped || !this.enabled()) throw new PlatformError('抖音已关闭。', 'rejected');
@@ -280,13 +387,6 @@ export class DouyinPlatform implements SocialPlatform {
     });
 
     this.context = context;
-    if (this.clearCachePending || Date.now() - this.lastCacheClear > 86400000) {
-      try {
-        await clearNetworkCache(context);
-        this.lastCacheClear = Date.now();
-        this.clearCachePending = false;
-      } catch {}
-    }
     context.once('close', () => {
       if (this.context === context) {
         this.context = undefined;
@@ -296,6 +396,20 @@ export class DouyinPlatform implements SocialPlatform {
         this.loginOpen = false;
       }
     });
+    this.windowHideState = 'off';
+    if (compatible && this.hideCompatibilityWindow()) {
+      await this.hideCompatibleContext(context);
+      context.on('page', () => {
+        void this.hideCompatibleContext(context);
+      });
+    }
+    if (this.clearCachePending || Date.now() - this.lastCacheClear > 86400000) {
+      try {
+        await clearNetworkCache(context);
+        this.lastCacheClear = Date.now();
+        this.clearCachePending = false;
+      } catch {}
+    }
     return context;
   }
   private async guardCommentPage(page: Page) {
@@ -311,6 +425,7 @@ export class DouyinPlatform implements SocialPlatform {
     const data: Capture = {
       creators: new Map(),
       videos: new Map(),
+      galleryUrls: new Map(),
       rows: [],
       pages: [],
       pending: new Set(),
@@ -378,6 +493,7 @@ export class DouyinPlatform implements SocialPlatform {
       try {
         const v = mapDouyinVideo(rawVideo);
         data.videos.set(v.id, v);
+        if (v.kind === 'images') data.galleryUrls.set(v.id, douyinImageUrls(rawVideo));
       } catch {
         /* Unrecognized records have no usable target. */
       }
@@ -416,11 +532,20 @@ export class DouyinPlatform implements SocialPlatform {
   }
   private async checkPageBlock(page: Page) {
     const title = (await page.title()).trim();
-    if (/^(?:验证码中间页|安全验证|验证中心)(?:$|\s|[-—|])/.test(title))
+    const matched = title.match(/^(验证码中间页|安全验证|验证中心)(?:$|\s|[-—|])/);
+    if (matched) {
+      this.verification = {
+        paused: true,
+        at: new Date().toISOString(),
+        pageTitle: matched[1],
+        browserMode: this.status().browserMode as DouyinVerification['browserMode'],
+      };
+      this.verificationReturnUrl = this.verificationUrl(this.requestedPages.get(page));
       throw new PlatformError(
-        '抖音官网正在要求人工验证，后台不能代为完成。请在配置页打开抖音登录窗口，完成官网验证后点击“完成抖音登录”，再用“检查抖音推荐流”重试；这不代表账号已掉线，也不会自动切换有窗口模式。',
+        '抖音页面要求人工验证，同类自动访问已暂停；这不代表账号掉线。请在小鲸鱼爱冲浪“配置 → 抖音”点击“处理人工验证”，完成官网提示后点击“完成登录并检查后台”。若可见窗口没有验证而后台仍被拦，可在连接选项主动选择兼容窗口模式，再检查推荐流；登录成功不能保证后台可用，不要反复重试或承诺已经恢复。',
         'auth',
       );
+    }
   }
   private async settle(
     page: Page,
@@ -468,6 +593,11 @@ export class DouyinPlatform implements SocialPlatform {
             '独立Edge正在等待你登录；登录后在配置页点“完成抖音登录”。',
             'auth',
           );
+        if (this.verification?.paused)
+          throw new PlatformError(
+            '抖音人工验证仍在等待处理，未重新启动浏览器；请在配置页处理验证并检查后台后再继续。',
+            'auth',
+          );
         if (this.idleTimer) clearTimeout(this.idleTimer);
         ctx = await this.launch(visible);
         this.operationStage = '创建页面';
@@ -480,6 +610,8 @@ export class DouyinPlatform implements SocialPlatform {
           await this.guardCommentPage(p);
         }
         combined.throwIfAborted();
+        await this.hideCompatibleContext(ctx);
+        this.requestedPages.set(p, url);
         p.setDefaultTimeout(this.timeoutMs());
         let data = this.pageData.get(p);
         if (!data) {
@@ -490,6 +622,7 @@ export class DouyinPlatform implements SocialPlatform {
         if (p.url() !== url || url === ORIGIN + '/user/self') {
           data.creators.clear();
           data.videos.clear();
+          data.galleryUrls.clear();
           data.rows = [];
           data.pages = [];
           data.self = undefined;
@@ -501,6 +634,10 @@ export class DouyinPlatform implements SocialPlatform {
         this.operationStage = kind === 'chat' ? '读取群聊' : '读取网页';
         const result = await action(p, data);
         combined.throwIfAborted();
+        if (kind === 'main' && this.verificationReturnUrl === this.verificationUrl(url)) {
+          this.verification = undefined;
+          this.verificationReturnUrl = undefined;
+        }
         return result;
       } catch (error) {
         this.detail = combined.aborted
@@ -544,19 +681,25 @@ export class DouyinPlatform implements SocialPlatform {
   async openLogin() {
     return this.serial(async () => {
       if (this.context && this.loginOpen)
-        return { detail: '独立Edge已打开，请在其中完成抖音登录。' };
+        return {
+          detail: '专用Edge窗口已打开；请处理官网显示的登录或验证，完成后回配置页检查后台。',
+        };
       if (this.idleTimer) clearTimeout(this.idleTimer);
       if (this.context) await this.context.close();
       const ctx = await this.launch(true);
       this.loginOpen = true;
       try {
         const p = ctx.pages()[0] || (await ctx.newPage());
-        await p.goto(ORIGIN + '/jingxuan', { waitUntil: 'domcontentloaded', timeout: 22000 });
+        await p.goto(this.verificationReturnUrl ?? ORIGIN + '/jingxuan', {
+          waitUntil: 'domcontentloaded',
+          timeout: 22000,
+        });
         const login = p.getByRole('button', { name: '登录', exact: true });
-        if (await login.isVisible().catch(() => false))
+        if (!this.verification && (await login.isVisible().catch(() => false)))
           await login.click({ timeout: 5000 }).catch(() => {});
-        this.detail =
-          '请在独立Edge中扫码登录；完成后回配置页点“完成抖音登录”。不会读取日常Edge账号。';
+        this.detail = this.verification
+          ? '已打开上次受阻的页面。已登录无需重复扫码；若有官网验证请手动完成。若此窗口没有验证提示，也请回配置页点击“完成登录并检查后台”，以实际读取结果判断是否恢复。'
+          : '已打开专用Edge；未登录时在其中扫码，已登录则无需重复扫码。完成后回配置页点击“完成登录并检查后台”。';
         return { detail: this.detail };
       } catch (e) {
         await ctx.close().catch(() => {});
@@ -947,7 +1090,44 @@ export class DouyinPlatform implements SocialPlatform {
     );
   }
   private async pageVideo(p: Page, data: Capture, id: string): Promise<Video | undefined> {
-    if (data.videos.has(id)) return data.videos.get(id);
+    const cached = data.videos.get(id);
+    if (cached && (cached.kind !== 'images' || cached.imageCount)) return cached;
+    // The official web app may render the target gallery without a separate detail request.
+    const embedded = await p.evaluate((wanted) => {
+      const raw = document.querySelector('script#RENDER_DATA[type="application/json"]')?.textContent;
+      if (!raw || raw.length > 3_000_000) return;
+      try {
+        const data = JSON.parse(raw.startsWith('%') ? decodeURIComponent(raw) : raw);
+        const detail = data?.app?.videoDetail;
+        if (detail?.awemeId !== wanted || !Array.isArray(detail.images) || !detail.images.length)
+          return;
+        return {
+          aweme_id: wanted,
+          desc: typeof detail.desc === 'string' ? detail.desc.slice(0, 4000) : '',
+          create_time: detail.createTime,
+          author: {
+            nickname: detail.authorInfo?.nickname,
+            sec_uid: detail.authorInfo?.secUid,
+          },
+          images: detail.images.slice(0, 100).map((image: { urlList?: unknown } | null) => ({
+            url_list: Array.isArray(image?.urlList)
+              ? image.urlList.slice(0, 8).map((url: unknown) =>
+                  typeof url === 'string' && url.length <= 4000 ? url : null,
+                )
+              : [],
+          })),
+        };
+      } catch {
+        return;
+      }
+    }, id);
+    if (embedded) {
+      const video = mapDouyinVideo(embedded);
+      data.videos.set(id, video);
+      data.galleryUrls.set(id, douyinImageUrls(embedded));
+      return video;
+    }
+    if (cached) return cached;
     // Server-rendered pages may never request the detail API. Bind visible facts to an exact public hashtag link.
     const facts = await p.evaluate((wanted) => {
       const link = [...document.querySelectorAll<HTMLAnchorElement>('a[href]')].find((a) => {
@@ -1050,15 +1230,21 @@ export class DouyinPlatform implements SocialPlatform {
   }
   async video(input: string, part = 1, signal?: AbortSignal): Promise<Video> {
     const id = douyinVideoId(input);
+    const note = input.startsWith(ORIGIN + '/note/');
     if (part !== 1) throw new PlatformError('抖音视频请提供具体作品链接，暂不支持合集分集参数。');
     return this.visit(
       playerUrl(id),
       async (p, data) => {
         await this.dismiss(p);
-        await this.settle(p, data, async () => Boolean(await this.pageVideo(p, data, id)), 15000);
+        await this.settle(p, data, async () => {
+          const item = await this.pageVideo(p, data, id);
+          if (!item) return false;
+          if (note || item.kind === 'images') return Boolean(item.imageCount);
+          return true;
+        }, 15000);
         const video = await this.pageVideo(p, data, id);
-        if (video) {
-          this.detail = '已读取抖音视频详情。';
+        if (video && (!note || video.kind === 'images')) {
+          this.detail = video.kind === 'images' ? '已读取抖音图文详情。' : '已读取抖音视频详情。';
           return video;
         }
         throw new PlatformError(
@@ -1447,6 +1633,82 @@ export class DouyinPlatform implements SocialPlatform {
       signal,
     );
   }
+  async gallery(video: Video, indices: number[], signal?: AbortSignal) {
+    const id = douyinVideoId(video.url);
+    if (id !== douyinVideoId(video.id) || video.kind !== 'images')
+      throw new PlatformError('目标作品未核实为对应图文。');
+    if (!indices.length || indices.length > 6 || indices.some(i => !Number.isSafeInteger(i) || i < 1 || i > 100))
+      throw new PlatformError('图文读取范围无效。');
+    return this.visit(playerUrl(id), async (p, data) => {
+      await this.dismiss(p);
+      await this.settle(p, data, async () => {
+        await this.pageVideo(p, data, id);
+        return data.galleryUrls.has(id);
+      }, 6000);
+      const urls = data.galleryUrls.get(id);
+      if (!urls?.length) throw new PlatformError('官网未返回目标图文的图片列表，未把封面当作整组。', 'network');
+      const frames: Array<{ atSec: number; bytes: Buffer }> = [];
+      for (const index of indices) {
+        signal?.throwIfAborted();
+        const url = urls[index - 1];
+        if (!url) continue;
+        try {
+          const timeout = AbortSignal.timeout(8000);
+          const response = await fetch(url, {
+            redirect: 'error',
+            signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
+            headers: { Referer: ORIGIN + '/' },
+          });
+          const mime = (response.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+          const cap = 4 * 1024 * 1024;
+          if (!response.ok || !/^image\/(jpeg|png|webp)$/.test(mime) ||
+              Number(response.headers.get('content-length') || 0) > cap) {
+            await response.body?.cancel();
+            continue;
+          }
+          const reader = response.body?.getReader();
+          if (!reader) continue;
+          const chunks: Uint8Array[] = [];
+          let length = 0;
+          try {
+            for (;;) {
+              const part = await reader.read();
+              if (part.done) break;
+              length += part.value.length;
+              if (length > cap) break;
+              chunks.push(part.value);
+            }
+          } finally {
+            await reader.cancel().catch(() => {});
+          }
+          if (!length || length > cap) continue;
+          const encoded = await p.evaluate(async ({ base64, mime }) => {
+            const input = Uint8Array.from(atob(base64), c => c.charCodeAt(0));
+            const image = await createImageBitmap(new Blob([input], { type: mime }));
+            try {
+              const scale = Math.min(1, 960 / Math.max(image.width, image.height));
+              const canvas = document.createElement('canvas');
+              canvas.width = Math.max(1, Math.round(image.width * scale));
+              canvas.height = Math.max(1, Math.round(image.height * scale));
+              const ctx = canvas.getContext('2d');
+              if (!ctx) throw Error('Cannot render image');
+              ctx.fillStyle = '#fff';
+              ctx.fillRect(0, 0, canvas.width, canvas.height);
+              ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+              return canvas.toDataURL('image/jpeg', 0.8).split(',')[1];
+            } finally { image.close(); }
+          }, { base64: Buffer.concat(chunks, length).toString('base64'), mime });
+          frames.push({ atSec: index, bytes: Buffer.from(encoded, 'base64') });
+        } catch {
+          signal?.throwIfAborted();
+          if (p.isClosed()) throw new PlatformError('读取图文时网页已关闭。', 'network');
+          // Partial delivery is explicit; do not substitute the cover or a different work.
+        }
+      }
+      if (!frames.length) throw new PlatformError('本批图片未能读取，未返回封面替代。', 'network');
+      return frames;
+    }, signal);
+  }
   async frames(video: Video, times: number[], signal?: AbortSignal) {
     const id = douyinVideoId(video.url);
     if (id !== douyinVideoId(video.id)) throw new PlatformError('采样地址与视频编号不一致。');
@@ -1454,9 +1716,9 @@ export class DouyinPlatform implements SocialPlatform {
       playerUrl(id),
       async (p, data) => {
         await this.dismiss(p);
-        await this.settle(p, data, () => data.videos.has(video.id));
-        await this.pageVideo(p, data, video.id);
-        if (!data.videos.has(video.id))
+        await this.settle(p, data, async () => Boolean(await this.pageVideo(p, data, id)));
+        const observed = await this.pageVideo(p, data, id);
+        if (observed?.kind !== 'video' || Math.abs(observed.durationSec - video.durationSec) >= 2)
           throw new PlatformError('目标视频尚未核对，未采样其他作品。', 'rejected');
         // The page also contains a tiny 2.6-second placeholder player. Never return it as a real frame.
         await p.waitForFunction(
@@ -1489,7 +1751,7 @@ export class DouyinPlatform implements SocialPlatform {
         const index = indices[0],
           player = p.locator('video').nth(index);
         const frames = [];
-        for (const time of times.slice(0, 6)) {
+        for (const time of times.slice(0, MAX_VIDEO_FRAMES)) {
           signal?.throwIfAborted();
           await player.evaluate(async (el, t) => {
             const v = el as HTMLVideoElement;
@@ -1616,16 +1878,17 @@ export class DouyinPlatform implements SocialPlatform {
           }
           stage = this.operationStage = '填写评论';
           const editors = p.locator('[contenteditable="true"]:visible');
+          const placeholder = p
+            .locator('.comment-input-inner-container')
+            .getByText(/^留下你的(?:精彩)?评论吧$/u)
+            .filter({ visible: true });
+          await editors.or(placeholder).first().waitFor({ state: 'visible' });
           if (!(await editors.count())) {
-            const placeholder = p
-              .getByText('留下你的精彩评论吧', { exact: true })
-              .filter({ visible: true });
-            if ((await placeholder.count()) === 1) {
-              await placeholder.click();
-              await editors.first().waitFor({ state: 'visible', timeout: this.timeoutMs() });
-            }
+            if ((await placeholder.count()) !== 1)
+              throw new PlatformError('未找到唯一的抖音评论输入框，尚未提交。', 'rejected');
+            await placeholder.click();
+            await editors.first().waitFor({ state: 'visible' });
           }
-          await editors.first().waitFor({ state: 'visible', timeout: this.timeoutMs() });
           if ((await editors.count()) !== 1)
             throw new PlatformError('未找到唯一的抖音评论输入框，尚未提交。', 'rejected');
           const editor = editors.first();
@@ -1646,23 +1909,14 @@ export class DouyinPlatform implements SocialPlatform {
           }
           if ((await send.count()) !== 1)
             throw new PlatformError('评论发送按钮不唯一，尚未提交。', 'rejected');
-          let submitted = false,
-            blocked = false;
+          let submitted = false;
+          let blockReason: string | undefined;
           let rejectRequest: () => void = () => {};
           const rejectedRequest = new Promise<undefined>((resolve) => {
             rejectRequest = () => resolve(undefined);
           });
           const allow = async (route: Route) => {
             const request = route.request();
-            let form: URLSearchParams;
-            try {
-              form = new URLSearchParams(request.postData() || '');
-            } catch {
-              blocked = true;
-              rejectRequest();
-              await route.abort();
-              return;
-            }
             if (submitted) {
               await route.abort();
               return;
@@ -1674,10 +1928,18 @@ export class DouyinPlatform implements SocialPlatform {
               request.method() !== 'POST' ||
               !this.enabled() ||
               !this.posting() ||
-              signal?.aborted ||
-              !matchesDouyinPublish(form, t, text)
+              signal?.aborted
             ) {
-              blocked = true;
+              blockReason = '抖音评论的发送条件已变化，未提交。';
+            } else {
+              const mismatch = douyinPublishMismatch(
+                new URLSearchParams(request.postData() || ''),
+                t,
+                text,
+              );
+              if (mismatch) blockReason = '网页提交的' + mismatch + '与准备记录不一致，已阻止提交。';
+            }
+            if (blockReason) {
               rejectRequest();
               await route.abort();
               return;
@@ -1702,8 +1964,7 @@ export class DouyinPlatform implements SocialPlatform {
             await send.click();
             stage = this.operationStage = '等待发送回执';
             const result = await Promise.race([response, rejectedRequest]);
-            if (blocked)
-              throw new PlatformError('提交的目标或文字与准备记录不一致，已阻止提交。', 'rejected');
+            if (blockReason) throw new PlatformError(blockReason, 'rejected');
             if (!result) {
               if (submitted) throw new Error('提交后未取得回执；请核实原记录，禁止自动重发。');
               throw new Error('点击发送后未取得回执，结果待核对；禁止自动重发。');

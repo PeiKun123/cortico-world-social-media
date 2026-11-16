@@ -133,19 +133,26 @@ export class SocialService {
       perPersonLimit: MAX_REPLIES_PER_PERSON,
     };
   }
+  connectionStatus() {
+    return [...this.states.values()].map((s) => ({
+      ...s,
+      enabled: this.cfg.platforms[s.id]?.enabled ?? false,
+      monitor: this.cfg.platforms[s.id]?.monitor.enabled ?? false,
+      posting: this.cfg.platforms[s.id]?.posting.enabled ?? false,
+    }));
+  }
   status() {
+    const replies = this.pendingReplies();
+    const { pending, unknown } = this.store.interactionCounts();
     return {
-      platforms: [...this.states.values()].map((s) => ({
+      platforms: this.connectionStatus().map((s) => ({
         ...s,
-        enabled: this.cfg.platforms[s.id]?.enabled ?? false,
-        monitor: this.cfg.platforms[s.id]?.monitor.enabled ?? false,
-        posting: this.cfg.platforms[s.id]?.posting.enabled ?? false,
-        replyPriority: this.pendingReplies().filter((i) => i.platform === s.id).length,
+        replyPriority: replies.filter((i) => i.platform === s.id).length,
         publishing: this.publishingUsage(s.id, s.account?.id),
       })),
       plannedPlatforms: ['douyin', 'kuaishou'].filter((id) => !this.adapters.has(id)),
-      pending: this.store.inbox().filter((i) => i.status === 'pending').length,
-      unknown: this.store.outbox().filter((i) => i.status === 'unknown').length,
+      pending,
+      unknown,
     };
   }
   async poll(signal?: AbortSignal, force = false) {
@@ -346,12 +353,13 @@ export class SocialService {
     }
     return { requeued };
   }
-  pendingReplies() {
+  pendingReplies(ownerCommentsOnly = false) {
     if (this.storageLimit()) return [];
     return this.store
       .inbox()
       .filter(
         (i) =>
+          (!ownerCommentsOnly || Boolean(i.focusOwnerId && i.notificationType === 'focus-comment' && i.target.parent !== '0')) &&
           this.notificationEnabled(i, true) &&
           this.cfg.platforms[i.platform].posting.enabled &&
           !this.hasNotificationSend(i) &&
@@ -384,6 +392,8 @@ export class SocialService {
         )
         .sort(
           (a, b) =>
+            Number(Boolean(b.focusOwnerId && b.notificationType === 'focus-comment')) -
+              Number(Boolean(a.focusOwnerId && a.notificationType === 'focus-comment')) ||
             Number(Boolean(b.focusOwnerId)) - Number(Boolean(a.focusOwnerId)) ||
             Number(Boolean(a.delivered)) - Number(Boolean(b.delivered)) ||
             a.occurredAt - b.occurredAt,

@@ -1,6 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { ROAMING_PLATFORMS, roamingConfig, type SocialMediaConfigSection } from './config.ts';
 import type { SocialStore } from './store.ts';
+export type ReadingSource = '兴趣推荐' | '主动搜索' | '相邻主题';
+export function workFingerprint(title: string) {
+  return title.normalize('NFKC').toLowerCase().replace(/#[^#\s]+/gu, '').replace(/[\p{P}\p{S}\s]/gu, '');
+}
 export interface RoamSession {
   id: string;
   createdAt: string;
@@ -10,8 +14,9 @@ export interface RoamSession {
   yieldReason?: string;
   status: 'offered' | 'active' | 'finished' | 'skipped' | 'expired';
   searches: number;
+  exploration?: Partial<Record<'主动搜索' | '相邻主题', number>>;
   totalVideos?: number;
-  videos: Array<{ id: string; aid: string; title: string; url: string; commentsRead: number }>;
+  videos: Array<{ id: string; aid: string; title: string; url: string; commentsRead: number; source?: ReadingSource }>;
   summary?: string;
   completedAt?: string;
 }
@@ -212,10 +217,16 @@ export class Roaming {
         '。先回应新消息；不自动重发任何评论。',
     );
   }
-  search(id: string) {
+  search(id: string, source?: '主动搜索' | '相邻主题') {
     const r = this.session(id);
     if (this.policy(r).mode !== 'free' && r.searches >= this.policy(r).maxVideosPerSession * 2)
       throw Error('本轮搜索预算已用完，可以从已读结果选择或结束');
+    if (source) {
+      const used = r.exploration ??= {};
+      if ((used[source] ?? 0) >= (source === '相邻主题' ? 1 : 2))
+        throw Error('本轮这个来源的搜索机会已用完，可选已找到的作品或结束');
+      used[source] = (used[source] ?? 0) + 1;
+    }
     r.searches++;
     this.store.saveRoam(r);
   }
@@ -226,7 +237,15 @@ export class Roaming {
     this.search(id); // Bound failed/duplicate feed attempts as well as successful reads.
     return r.videos.map((v) => v.aid);
   }
-  recordVideo(id: string, video: { id: string; aid: string; title: string; url: string }) {
+  duplicate(id: string, title: string) {
+    const current = this.session(id);
+    const fingerprint = workFingerprint(title);
+    return fingerprint.length >= 12 && this.store.roams().slice(-30).some(round =>
+      this.platformOf(round) !== this.platformOf(current) &&
+      round.videos.some(video => workFingerprint(video.title) === fingerprint),
+    );
+  }
+  recordVideo(id: string, video: { id: string; aid: string; title: string; url: string }, source?: ReadingSource) {
     const r = this.session(id);
     if (!r.videos.some((v) => v.aid === video.aid)) {
       if (this.policy(r).mode !== 'free' && r.videos.length >= this.policy(r).maxVideosPerSession)
@@ -238,6 +257,7 @@ export class Roaming {
         title: video.title.slice(0, 200),
         url: video.url,
         commentsRead: 0,
+        ...(source ? { source } : {}),
       });
       r.videos = r.videos.slice(-100);
       this.store.saveRoam(r);
@@ -255,10 +275,12 @@ export class Roaming {
     if (left <= 0) throw Error('本视频评论阅读预算已用完，可表达观点或结束');
     return left;
   }
-  comments(id: string, aid: string, input: unknown) {
+  comments(id: string, aid: string, input: unknown, diversify = false) {
     let left = this.remainingComments(id, aid);
     let consumed = 0;
-    type Node = { replies?: Node[]; [key: string]: unknown };
+    type Node = { replies?: Node[]; createdAt?: number; text?: string; [key: string]: unknown };
+    const page = input as { items: Node[]; root?: Node; [key: string]: unknown };
+    const sample = diversify && !page.root && Number.isFinite(left) && left >= 3 && (page.items?.length ?? 0) > left;
     const trim = (list: Node[]): Node[] => {
       const out: Node[] = [];
       for (const raw of list) {
@@ -266,14 +288,19 @@ export class Roaming {
         left--;
         consumed++;
         const copy = { ...raw };
-        if (Array.isArray(copy.replies)) copy.replies = trim(copy.replies);
+        if (Array.isArray(copy.replies)) copy.replies = trim(sample ? (left > 2 ? copy.replies.slice(0, 1) : []) : copy.replies);
         out.push(copy);
       }
       return out;
     };
-    const page = input as { items: Node[]; root?: Node; [key: string]: unknown };
     const root = page.root ? trim([page.root])[0] : undefined;
-    const items = trim(page.items || []);
+    const rows = page.items || [];
+    const [first, ...rest] = rows;
+    const contextual = sample ? rest.find(item => item.replies?.length && (item.text?.length ?? 0) >= 12) : undefined;
+    const recent = sample ? rest.filter(item => item !== contextual && item.createdAt && (item.text?.length ?? 0) >= 12)
+      .sort((a, b) => b.createdAt! - a.createdAt!)[0] : undefined;
+    const priority = [first, recent, contextual].filter((item): item is Node => Boolean(item));
+    const items = trim(sample ? [...priority, ...rest.filter(item => !priority.includes(item))] : rows);
     const r = this.session(id);
     r.videos.find((v) => v.aid === aid)!.commentsRead += consumed;
     this.store.saveRoam(r);

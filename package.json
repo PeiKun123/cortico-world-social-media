@@ -1,8 +1,8 @@
 {
   "name": "cortico-world-social-media",
-  "version": "0.6.5",
+  "version": "0.6.12",
   "type": "module",
-  "description": "社交视窗：B站视频、动态读写与评论，实验接入抖音、快手；按作品归档互动，分平台设置特别关注与闲逛，B站可选主动@关注、抖音可监听指定群。快手暂不支持图文发评与群聊。沿用现有模型。",
+  "description": "小鲸鱼爱冲浪：B站视频、动态读写与评论，实验接入抖音、快手与 Gemini 网页陪练；按作品归档互动，分平台设置特别关注与闲逛，B站可选主动@关注、抖音可监听指定群。快手暂不支持图文发评与群聊。沿用现有模型。",
   "license": "MIT",
   "engines": {
     "node": ">=22.16"
@@ -22,27 +22,28 @@
   "cortico": {
     "kind": "world",
     "api": 6,
-    "displayName": "社交视窗",
+    "displayName": "小鲸鱼爱冲浪",
     "describe": "describe.json",
-    "webUiClient": "dist/webui.js",
-    "webUiStyle": "dist/webui.css",
+    "webUiClient": "dist/webui-surf-0612-release.js",
+    "webUiStyle": "dist/webui-surf-0612-release.css",
     "tags": [
       "video",
       "browser",
       "internet",
       "external-setup",
       "experimental",
+      "high-cost",
       "unofficial-api"
     ],
-    "icon": "assets/icon.png",
+    "icon": "assets/icon-surf.png",
     "locales": {
       "zh": {
-        "displayName": "社交视窗",
-        "description": "社交视窗：B站视频、动态读写与评论，实验接入抖音、快手；按作品归档互动，分平台设置特别关注与闲逛，B站可选主动@关注、抖音可监听指定群。快手暂不支持图文发评与群聊。沿用现有模型。"
+        "displayName": "小鲸鱼爱冲浪",
+        "description": "小鲸鱼爱冲浪：B站视频、动态读写与评论，实验接入抖音、快手与 Gemini 网页陪练；按作品归档互动，分平台设置特别关注与闲逛，B站可选主动@关注、抖音可监听指定群。快手暂不支持图文发评与群聊。沿用现有模型。"
       },
       "en": {
-        "displayName": "Social Window",
-        "description": "Social Window: Bilibili videos, text dynamics and comments, with experimental Douyin and Kuaishou adapters. Per-work records, owner focus and roaming; opt-in Bilibili focus mentions and allowlisted Douyin groups. No Kuaishou image-post comments or group chats. Uses your existing model."
+        "displayName": "Little Whale Loves Surfing",
+        "description": "Little Whale Loves Surfing: Bilibili videos, text dynamics and comments, with experimental Douyin and Kuaishou adapters and Gemini web coaching. Per-work records, owner focus and roaming; opt-in Bilibili focus mentions and allowlisted Douyin groups. No Kuaishou image-post comments or group chats. Uses your existing model."
       }
     },
     "screenshots": [

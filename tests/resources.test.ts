@@ -53,6 +53,17 @@ describe('owned media resources', () => {
     ).rejects.toThrow('今日');
     expect(called).toBe(false);
   });
+  it('allows unlimited daily calls while respecting the off switch and per-image budget', async () => {
+    const x = await setup({ maxDailyVisualCalls: 1, maxImageKB: 1 });
+    await x.r.observe('one', async () => frames);
+    x.cfg.unlimitedDailyVisualCalls = true;
+    await x.r.observe('two', async () => frames);
+    await expect(x.r.observe('oversize', async () => [{ atSec: 1, bytes: new Uint8Array(1025) }]))
+      .rejects.toThrow('图片');
+    x.cfg.maxDailyVisualCalls = 0;
+    await expect(x.r.observe('one', async () => frames)).rejects.toThrow('画面观察已关闭');
+    expect(x.r.status().todayCalls).toBe(3);
+  });
   it('keeps the cumulative host contribution counter when local cached images are cleared', async () => {
     const x = await setup({ maxPublishedMediaMB: 0.000005 });
     await expect(x.r.observe('one', async () => frames)).rejects.toThrow('累计');

@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { chromium, type Browser } from 'playwright-core';
 import { DouyinPlatform } from '../src/platforms/douyin.ts';
+import * as windowVisibility from '../src/platforms/windows-browser.ts';
 import { findBrowserExecutable } from '../src/platforms/bilibili-browser.ts';
 const id = '7697799441646256819';
 const target = { oid: id, type: 2, root: '0', parent: '0' };
@@ -17,6 +18,7 @@ describe.skipIf(!findBrowserExecutable())('Douyin real-browser offline boundarie
   async function fixture(
     options: {
       compatibilityWindow?: boolean;
+      hideCompatibilityWindow?: boolean;
       coldFeed?: boolean;
       verification?: boolean;
       userSearch?: boolean;
@@ -33,10 +35,14 @@ describe.skipIf(!findBrowserExecutable())('Douyin real-browser offline boundarie
       delayedSelf?: boolean;
       noSlash?: boolean;
       collapsed?: boolean;
+      searchPlaceholder?: boolean;
       images?: boolean;
+      gallery?: boolean;
+      embeddedGallery?: boolean;
       feed?: boolean;
       owner?: boolean;
       wrongVideo?: boolean;
+      wrongText?: boolean;
       twice?: boolean;
       httpFailure?: boolean;
       uid?: string;
@@ -68,6 +74,7 @@ describe.skipIf(!findBrowserExecutable())('Douyin real-browser offline boundarie
       () => options.releaseAfterTask ?? false,
       () => options.compatibilityWindow ?? false,
       () => 15,
+      () => options.hideCompatibilityWindow ?? false,
     );
     const launch = vi
       .spyOn(chromium, 'launchPersistentContext')
@@ -142,6 +149,7 @@ describe.skipIf(!findBrowserExecutable())('Douyin real-browser offline boundarie
                   desc: '游戏创作',
                   author: { nickname: '作者' },
                   video: { duration: 10000 },
+                  ...(options.gallery ? { images: [1, 2, 3].map(i => ({url_list: ['https://p3-sign.douyinpic.com/fixture-'+i+'.jpg']})) } : {}),
                 },
               }),
             });
@@ -209,14 +217,20 @@ describe.skipIf(!findBrowserExecutable())('Douyin real-browser offline boundarie
                     : options.ssrSelf
                       ? '<h1>测试账号</h1><link rel=canonical href=https://www.douyin.com/user/MS4wLjABAAAAtest_owner_identity>'
                       : '<script>fetch("/aweme/v1/web/user/profile/self/")</script>'
-                  : '<html><body><section><video id=placeholder style="width:10px;height:10px"></video><video id=real style="width:320px;height:180px;background:linear-gradient(red,blue)"></video><p>@作者 · 今天</p><div data-e2e="video-desc">游戏创作 <a href="https://www.douyin.com/search/game?aweme_id=' +
+                  : (options.embeddedGallery
+                      ? '<script id="RENDER_DATA" type="application/json">' +
+                        encodeURIComponent(JSON.stringify({ app: { videoDetail: {
+                          awemeId: id, desc: '真实页面结构', authorInfo: { nickname: '作者' },
+                          images: [1, 2, 3].map(i => ({ urlList: ['https://p3-sign.douyinpic.com/fixture-' + i + '.jpg'] })),
+                        } } })) + '</script>'
+                      : '') + '<html><body><section><video id=placeholder style="width:10px;height:10px"></video><video id=real style="width:320px;height:180px;background:linear-gradient(red,blue)"></video><p>@作者 · 今天</p><div data-e2e="video-desc">游戏创作 <a href="https://www.douyin.com/search/game?aweme_id=' +
                     id +
                     '">#游戏</a></div></section><div data-e2e="feed-comment-icon">评论</div><div id="rows"></div><section><div contenteditable="true"></div><button id="send">发送</button></section><script>' +
                     'for(const v of document.querySelectorAll("video")){let time=0;Object.defineProperties(v,{duration:{get:()=>v.id==="real"?10:2.6},readyState:{get:()=>4},seeking:{get:()=>false},currentTime:{get:()=>time,set:x=>time=x}});v.pause=()=>{};}' +
                     (options.images
                       ? 'document.querySelector("#real").remove();document.querySelector("#placeholder").remove();const image=document.createElement("img");image.style="width:320px;height:180px";Object.defineProperty(image,"naturalWidth",{get:()=>1080});document.querySelector("section").prepend(image);document.querySelector("section").append("图文");'
                       : '') +
-                    (options.ssr || options.images ? '' : 'fetch("/aweme/v1/web/aweme/detail/");') +
+                    (options.ssr || options.images || options.embeddedGallery ? '' : 'fetch("/aweme/v1/web/aweme/detail/");') +
                     'document.querySelector("[data-e2e=feed-comment-icon]").onclick=async()=>{' +
                     (options.ssr
                       ? ''
@@ -255,7 +269,9 @@ describe.skipIf(!findBrowserExecutable())('Douyin real-browser offline boundarie
                       ? 'const moving=document.querySelector("[data-e2e=feed-comment-icon]");moving.style.display="inline-block";let shift=0;moving.onmouseenter=()=>{moving.style.transform="translateX("+(shift+=200)+"px)";};'
                       : '') +
                     (options.collapsed
-                      ? 'document.querySelector("[contenteditable]").outerHTML="<span id=activate>留下你的精彩评论吧</span>";document.querySelector("#activate").onclick=()=>{document.querySelector("#activate").outerHTML="<div contenteditable=true></div>";document.querySelector("[contenteditable]").onkeydown=e=>{if(e.key==="Enter"){e.preventDefault();document.querySelector("#send").click();}};};document.querySelector("#send").parentElement.classList.add("comment-input-inner-container");document.querySelector("#send").outerHTML="<div class=commentInput-right-ct><span id=send><svg width=32 height=32><path fill=#FE2C55 d=M0,0L32,32></path></svg></span></div>";'
+                      ? 'document.querySelector("[contenteditable]").outerHTML="<span id=activate>' +
+                         (options.searchPlaceholder ? '留下你的评论吧' : '留下你的精彩评论吧') +
+                         '</span>";document.querySelector("#activate").onclick=()=>{document.querySelector("#activate").outerHTML="<div contenteditable=true></div>";document.querySelector("[contenteditable]").onkeydown=e=>{if(e.key==="Enter"){e.preventDefault();document.querySelector("#send").click();}};};document.querySelector("#send").parentElement.classList.add("comment-input-inner-container");document.querySelector("#send").outerHTML="<div class=commentInput-right-ct><span id=send><svg width=32 height=32><path fill=#FE2C55 d=M0,0L32,32></path></svg></span></div>";'
                       : '') +
                     (options.feed
                       ? 'document.addEventListener("keydown",()=>{document.querySelector("[data-e2e=video-desc] a").href="https://www.douyin.com/search/game?aweme_id=7697799441646256821";document.querySelector("[data-e2e=video-desc] a").textContent="#新游戏";});'
@@ -264,7 +280,9 @@ describe.skipIf(!findBrowserExecutable())('Douyin real-browser offline boundarie
                     (options.noSlash ? '' : '/') +
                     '",{method:"POST",body:new URLSearchParams({aweme_id:"' +
                     (options.wrongVideo ? '123' : id) +
-                    '",text:document.querySelector("[contenteditable]").textContent,reply_id:(window.replyRoot||"0"),reply_to_reply_id:' +
+                    '",text:document.querySelector("[contenteditable]").textContent' +
+                     (options.wrongText ? '+"改动"' : '') +
+                     ',reply_id:(window.replyRoot||"0"),reply_to_reply_id:' +
                     (options.wrongReply ? '"100"' : '(window.replyParent||"0")') +
                     '})}).catch(()=>{});send();' +
                     (options.twice ? 'send();' : '') +
@@ -650,6 +668,41 @@ describe.skipIf(!findBrowserExecutable())('Douyin real-browser offline boundarie
       await f.cleanup();
     }
   });
+  it.each(['detail API', 'embedded page data'])('reads the requested later images from verified %s', async (source) => {
+    const f = await fixture({ gallery: source === 'detail API', embeddedGallery: source === 'embedded page data' });
+    const imagePage = await browser.newPage();
+    let fetchImage: { mockRestore(): void } | undefined;
+    try {
+      const data = await imagePage.evaluate(() => {
+        const canvas = document.createElement('canvas');
+        canvas.width = 320; canvas.height = 240;
+        const ctx = canvas.getContext('2d')!;
+        ctx.fillStyle = '#66ccff';
+        ctx.fillRect(0, 0, 320, 240);
+        return canvas.toDataURL('image/jpeg').split(',')[1];
+      });
+      const requested: string[] = [];
+      fetchImage = vi.spyOn(globalThis, 'fetch').mockImplementation(async url => {
+        requested.push(String(url));
+        return new Response(Uint8Array.from(Buffer.from(data, 'base64')), { headers: {'content-type':'image/jpeg'} });
+      });
+      const video = await f.adapter.video('https://www.douyin.com/note/' + id);
+      expect(video).toMatchObject({ kind: 'images', imageCount: 3, durationSec: 0 });
+      if (source === 'embedded page data') {
+        expect(await f.adapter.video(id)).toMatchObject({ id, kind: 'images', imageCount: 3 });
+        expect(await f.adapter.video('https://www.douyin.com/video/' + id)).toMatchObject({ id, kind: 'images', imageCount: 3 });
+      }
+      const images = await f.adapter.gallery(video, [2, 3]);
+      expect(images.map(image => image.atSec)).toEqual([2, 3]);
+      expect(images.every(image => image.bytes[0] === 255 && image.bytes[1] === 216)).toBe(true);
+      expect(requested.map(url => new URL(url).pathname)).toEqual(['/fixture-2.jpg','/fixture-3.jpg']);
+      expect(f.accepted()).toBe(0);
+    } finally {
+      fetchImage?.mockRestore();
+      await imagePage.close();
+      await f.cleanup();
+    }
+  });
   it('recognizes a real image post without requiring a video player or inventing audio duration', async () => {
     const f = await fixture({ images: true });
     try {
@@ -689,8 +742,8 @@ describe.skipIf(!findBrowserExecutable())('Douyin real-browser offline boundarie
       await f.cleanup();
     }
   });
-  it('activates a collapsed official-style editor and clicks only its scoped unlabeled send icon', async () => {
-    const f = await fixture({ collapsed: true });
+  it.each([false, true])('activates either official placeholder (search=%s) and clicks its scoped send icon', async (searchPlaceholder) => {
+    const f = await fixture({ collapsed: true, searchPlaceholder });
     try {
       expect(await f.adapter.send(target, '这个细节好可爱', undefined, '42')).toMatchObject({
         receiptId: '7697799441646256820',
@@ -723,11 +776,15 @@ describe.skipIf(!findBrowserExecutable())('Douyin real-browser offline boundarie
       await f.cleanup();
     }
   });
-  it('blocks a mismatched destination before it reaches the network', async () => {
-    const f = await fixture({ wrongVideo: true });
+  it.each([
+    [{ wrongVideo: true }, '作品编号'],
+    [{ wrongText: true }, '评论正文'],
+  ] as const)('blocks a mismatched request and identifies the field (%j, %s)', async (options, field) => {
+    const f = await fixture(options);
     try {
       await expect(f.adapter.send(target, '测试', undefined, '42')).rejects.toMatchObject({
         kind: 'rejected',
+        message: expect.stringContaining(field),
       });
       expect(f.accepted()).toBe(0);
     } finally {
@@ -851,6 +908,46 @@ describe.skipIf(!findBrowserExecutable())('Douyin real-browser offline boundarie
       await f.cleanup();
     }
   });
+  it('remembers the blocked work, pauses unattended retries and opens that work for manual verification', async () => {
+    const options = { verification: true, releaseAfterTask: true };
+    const f = await fixture(options);
+    try {
+      await expect(f.adapter.video(id)).rejects.toThrow('人工验证');
+      expect(f.adapter.status().verification).toMatchObject({
+        pageTitle: '验证码中间页',
+        browserMode: 'windowless',
+      });
+      const count = f.navigations.length;
+      await expect(f.adapter.nextVideo([])).rejects.toThrow('等待处理');
+      expect(f.navigations).toHaveLength(count);
+      await f.adapter.openLogin();
+      expect(f.navigations.at(-1)).toBe('https://www.douyin.com/jingxuan?modal_id=' + id);
+      expect(f.headless()).toBe(false);
+      expect(f.accepted()).toBe(0);
+      await f.adapter.closeLogin();
+      options.verification = false;
+      f.adapter.resumeVerificationChecks();
+      await f.adapter.video(id);
+      expect(f.adapter.status().verification).toBeUndefined();
+      expect(f.current()).toBeUndefined();
+    } finally {
+      await f.cleanup();
+    }
+  });
+  it('does not claim verification recovered just because the account check succeeded', async () => {
+    const options = { verification: true, releaseAfterTask: true, ssrSelf: true };
+    const f = await fixture(options);
+    try {
+      await expect(f.adapter.video(id)).rejects.toThrow('人工验证');
+      options.verification = false;
+      f.adapter.resumeVerificationChecks();
+      await f.adapter.account();
+      expect(f.adapter.status().verification).toBeDefined();
+      expect(f.accepted()).toBe(0);
+    } finally {
+      await f.cleanup();
+    }
+  });
   it('recognizes explicit verification without calling it a logged-out account or waiting through feed retries', async () => {
     const f = await fixture({ verification: true });
     try {
@@ -874,6 +971,38 @@ describe.skipIf(!findBrowserExecutable())('Douyin real-browser offline boundarie
         expect(f.launchArgs()).not.toContain('--window-position=-32000,-32000');
         expect(f.launchArgs()).toContain('--window-position=100,100');
       } finally {
+        await f.cleanup();
+      }
+    },
+  );
+  it.skipIf(process.platform !== 'win32')(
+    'hides compatible work only and never hides an explicit login; native failure falls back',
+    async () => {
+      const f = await fixture({
+        compatibilityWindow: true,
+        hideCompatibilityWindow: true,
+        releaseAfterTask: true,
+      });
+      const hide = vi
+        .spyOn(windowVisibility, 'hideOwnedBrowserWindows')
+        .mockResolvedValue({ windows: 1, onScreen: 0, taskbar: 0 });
+      try {
+        await f.adapter.video(id);
+        expect(hide).toHaveBeenCalled();
+        expect(f.adapter.status().windowHiding.state).toBe('hidden');
+        const calls = hide.mock.calls.length;
+        await f.adapter.openLogin();
+        expect(hide.mock.calls.length).toBe(calls);
+        expect(f.headless()).toBe(false);
+        await f.adapter.closeLogin();
+        hide.mockRejectedValueOnce(new Error('native failure private path'));
+        await f.adapter.video(id);
+        expect(f.adapter.status().windowHiding.state).toBe('failed');
+        expect(JSON.stringify(f.adapter.status())).not.toContain('private path');
+        expect(f.current()).toBeUndefined();
+        expect(f.accepted()).toBe(0);
+      } finally {
+        hide.mockRestore();
         await f.cleanup();
       }
     },

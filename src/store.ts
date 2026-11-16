@@ -16,6 +16,7 @@ import { randomUUID } from 'node:crypto';
 import type { RoamSession } from './roaming.ts';
 import type {
   InboxItem,
+  CommentTarget,
   SendRecord,
   PublicVideo,
   PublicComment,
@@ -49,6 +50,7 @@ interface State {
 /** One store per deployment. Writes replace a complete, bounded snapshot atomically. */
 export class SocialStore {
   private state: State;
+  private recordsVersion = randomUUID();
   private file: string;
   private archive: SendArchive;
   constructor(
@@ -298,7 +300,7 @@ export class SocialStore {
     this.state.videos = [...this.state.videos.filter((v) => v.aid !== video.aid), value].slice(
       -200,
     );
-    this.save();
+    this.save(true);
     return structuredClone(value);
   }
   publicComments() {
@@ -327,7 +329,7 @@ export class SocialStore {
         target: structuredClone(comment.target),
       },
     ].slice(-1000);
-    this.save();
+    this.save(true);
   }
   rememberComments(input: unknown) {
     if (!input || typeof input !== 'object') return;
@@ -357,7 +359,7 @@ export class SocialStore {
       merged.set(key(c), c);
     }
     this.state.comments = [...merged.values()].slice(-1000);
-    this.save();
+    this.save(true);
   }
   briefs() {
     return structuredClone(this.state.briefs);
@@ -398,6 +400,80 @@ export class SocialStore {
   }
   outbox() {
     return structuredClone(this.state.outbox);
+  }
+  get recordsRevision() {
+    return this.recordsVersion;
+  }
+  interactionCounts() {
+    let pending = 0, sent = 0, unknown = 0, unconfirmed = 0;
+    for (const entry of this.state.inbox) if (entry.status === 'pending') pending++;
+    for (const r of this.state.outbox) {
+      if (r.status === 'sent') sent++;
+      if (r.status === 'unknown') unknown++;
+      if (
+        r.status === 'unknown' || r.status === 'sending' ||
+        (r.status === 'sent' && (!r.visibility || r.visibility.status === 'unconfirmed'))
+      ) unconfirmed++;
+    }
+    return { pending, sent, unknown, unconfirmed };
+  }
+  timelineEvidence(platforms: ReadonlyArray<{ id: string; account?: { id: string } }>) {
+    const inbox: InboxItem[] = [], outbox = new Map<string, SendRecord>();
+    for (const { id, account } of platforms) {
+      if (!account) continue;
+      const received = this.state.inbox.find(i => i.platform === id && i.accountId === account.id);
+      if (received) inbox.push(received);
+      let comment: SendRecord | undefined, reply: SendRecord | undefined, visible: SendRecord | undefined;
+      for (let i = this.state.outbox.length - 1; i >= 0; i--) {
+        const r = this.state.outbox[i];
+        if (r.platform !== id || r.accountId !== account.id || r.status !== 'sent' || !r.receiptId)
+          continue;
+        if (r.target.root === '0') comment ??= r;
+        else reply ??= r;
+        if (r.visibility?.status === 'public') visible ??= r;
+        if (comment && reply && visible) break;
+      }
+      for (const r of [comment, reply, visible]) if (r) outbox.set(r.id, r);
+    }
+    return {
+      inbox: structuredClone(inbox),
+      outbox: structuredClone([...outbox.values()].sort((a, b) => b.createdAt.localeCompare(a.createdAt))),
+    };
+  }
+  timelineRecords(compact: boolean) {
+    const targetKey = ({ type, oid, parent }: CommentTarget) => JSON.stringify([type, oid, parent]);
+    const referenced = new Set<string>();
+    const works = new Set<string>();
+    const inbox = this.state.inbox.map((entry) => {
+      works.add(entry.target.oid);
+      if (!compact) return entry;
+      const { delivered, deliveredAt, ...shown } = entry;
+      return shown;
+    }).sort((a, b) => b.occurredAt - a.occurredAt);
+    const outbox = [...this.state.outbox].reverse().map((record) => {
+      works.add(record.target.oid);
+      if (!compact || !record.preparation?.parent) referenced.add(targetKey(record.target));
+      if (!compact) return record;
+      const { preparation, operationId, recipientId, platformState, ...shown } = record;
+      if (!preparation) return shown;
+      const { video, parent, judgment, ...note } = preparation;
+      return {
+        ...shown,
+        preparation: {
+          ...note,
+          parent: parent && { id: parent.id, target: parent.target, author: parent.author, text: parent.text },
+          judgment: judgment && { reason: judgment.reason },
+          video: video && {
+            id: video.id, aid: video.aid, title: video.title, url: video.url, author: video.author,
+            updatedAt: video.updatedAt, observation: video.observation,
+          },
+        },
+      };
+    });
+    const videos = this.state.videos.filter(v => !compact || works.has(v.aid))
+      .map(({ aid, id, title, url, author, updatedAt }) => ({ aid, id, title, url, author, updatedAt }));
+    const comments = this.state.comments.filter(c => referenced.has(targetKey(c.target)));
+    return structuredClone({ inbox, outbox, videos, comments });
   }
   getInbox(id: string) {
     return structuredClone(this.state.inbox.find((x) => x.id === id));
@@ -465,7 +541,7 @@ export class SocialStore {
       const ids = new Set(records.map((r) => r.id));
       this.state.outbox = this.state.outbox.filter((r) => !ids.has(r.id));
       this.state.version = 2;
-      this.save();
+      this.save(true);
     }
     return { archived: records.length, ...this.historyStatus() };
   }
@@ -476,7 +552,7 @@ export class SocialStore {
       throw new Error('收件箱有 2000 条待处理消息，请处理后继续同步。');
     this.rememberContact(item);
     this.state.inbox.push(structuredClone(item));
-    this.save();
+    this.save(true);
     return true;
   }
   updateInbox(
@@ -491,7 +567,7 @@ export class SocialStore {
     const r = this.state.inbox.find((x) => x.id === id);
     if (!r) throw new Error('消息不存在');
     Object.assign(r, patch);
-    this.save();
+    this.save(true);
   }
   reserve(input: Omit<SendRecord, 'status' | 'createdAt'>) {
     if (this.getSend(input.id)) throw new Error('该发送操作已存在，请读取原回执。');
@@ -500,7 +576,7 @@ export class SocialStore {
       createdAt: new Date().toISOString(),
       status: 'sending',
     });
-    this.save();
+    this.save(true);
   }
   updateSend(
     id: string,
@@ -517,7 +593,7 @@ export class SocialStore {
       return structuredClone(archived);
     }
     Object.assign(r, patch);
-    this.save();
+    this.save(true);
     return structuredClone(r);
   }
   feed(key: string, sinceAt = Math.floor(Date.now() / 1000)) {
@@ -538,7 +614,8 @@ export class SocialStore {
     }
     this.save();
   }
-  private save() {
+  private save(recordsChanged = false) {
+    if (recordsChanged) this.recordsVersion = randomUUID();
     // Pending messages and all send keys survive compaction; old handled messages are presentation history.
     const handled = this.state.inbox.filter((x) => x.status === 'handled').slice(-1000);
     this.state.inbox = [...handled, ...this.state.inbox.filter((x) => x.status === 'pending')];

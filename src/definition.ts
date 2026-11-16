@@ -4,7 +4,7 @@ import { SOCIALMEDIA_TOOL_DECLS } from './tools.ts';
 import { SocialMediaWorld } from './world.ts';
 export const SOCIALMEDIA: WorldDefinition<SocialMediaConfigSection> = {
   id: 'socialmedia',
-  label: '社交视窗',
+  label: '小鲸鱼爱冲浪',
   defaults: () => structuredClone(SOCIALMEDIA_DEFAULTS),
   create: (ctx) => new SocialMediaWorld(ctx),
   describe: {
@@ -13,6 +13,7 @@ export const SOCIALMEDIA: WorldDefinition<SocialMediaConfigSection> = {
         '读取B站动态，或准备并发布纯文字动态；支持原生@特别关注，结果不明不补发。不支持私信。',
       socialmedia_groupchat: '读取本地指定抖音群并在该群接话，与QQ、Dungeon、评论区独立。',
       socialmedia_focus: '查看本地特别关注绑定、近期作品及参与记录，不能修改主人账号。',
+      socialmedia_expression: '保存公开引文，有邀请时在绑定的 Gemini 教学会话里练习，复盘、交接时评估训练经验，或检索说话手册。',
       socialmedia_prepare: '发言前整理原话、依据与友善表达建议，不发送内容。',
       socialmedia_roam: '查看闲逛额度与心得，开始、结束或跳过本轮。',
       socialmedia_status: '查看连接、平台开关和待处理数量。',
@@ -20,12 +21,16 @@ export const SOCIALMEDIA: WorldDefinition<SocialMediaConfigSection> = {
         '读取抖音下一条或快手官网推荐候选，按本轮额度记录；快手元数据不代表看过画面。',
       socialmedia_search: '检索B站或实验接入的抖音、快手；首屏范围与能力由平台返回。',
       socialmedia_video: '查看详情及账号可访问的字幕。',
-      socialmedia_watch: '抽取视频画面并返回采样时刻。',
+      socialmedia_watch: '按时间抽取视频分镜，或按编号分批读取抖音图文。',
       socialmedia_comments: '读取评论页或楼中楼。',
       socialmedia_inbox: '检索通知与发送回执，或标记消息已处理。',
       socialmedia_publish: '发布公开评论并保存实际结果。',
     }),
     events: [
+      { type: 'socialmedia.expression.handoff-needed', description: 'Gemini 明确提示教学会话达到长度限制，请告知主人切换绑定。' },
+      { type: 'socialmedia.expression.invite', description: '可选表达练习机会。小K自选公开话题，或跳过。' },
+      { type: 'socialmedia.expression.review', description: 'Gemini 有回复，可在连续训练中接着追问，或试一道新题并保存复盘。' },
+      { type: 'socialmedia.expression.assess', description: '上下文交接后，小K可评估近期训练经验的实用性并决定是否收进说话手册。' },
       {
         type: 'socialmedia.group.invite',
         description: '本地开启后，安静空闲时可在指定抖音群发起新话题；有限频率且可放弃。',

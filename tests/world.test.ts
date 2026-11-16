@@ -38,6 +38,29 @@ function setup() {
   return { world, ctx, cfg, requests: () => requests };
 }
 describe('Cortico integration', () => {
+  it('sends records once per revision and keeps setting reads small', async () => {
+    const { world, ctx } = setup();
+    const ui = world.webUi();
+    const store = new SocialStore(join(ctx.dataDir, 'socialmedia'));
+    // Seed the store before the World opens its own handle.
+    const target = { oid: '45', type: 1, root: '46', parent: '46' };
+    store.addInbox({
+      id: 'new', platform: 'bilibili', accountId: '42', authorId: '43', author: '原作者',
+      text: '原始评论', target, occurredAt: 12345, status: 'pending',
+    });
+    const first = await ui.invoke!('desk', 'status', ['compact']) as {
+      recordsRevision: string; inbox: Array<{ text: string }>;
+    };
+    expect(first.inbox).toMatchObject([{ text: '原始评论' }]);
+    expect(await ui.invoke!('desk', 'status', ['compact', first.recordsRevision]))
+      .not.toHaveProperty('inbox');
+    await ui.invoke!('desk', 'handled', ['new']);
+    const updated = await ui.invoke!('desk', 'status', ['compact', first.recordsRevision]);
+    expect(updated).toMatchObject({ pending: 0, inbox: [{ status: 'handled' }] });
+    expect(updated).not.toHaveProperty('recordsRevision', first.recordsRevision);
+    expect(await ui.invoke!('settings', 'status', ['compact'])).toMatchObject({ inbox: [], outbox: [] });
+    await world.stop();
+  });
   it('exposes neither cookies nor login keys in tools, state or prefix', async () => {
     const x = setup();
     await x.world.webUi().invoke!('desk', 'cookie', [
@@ -204,7 +227,7 @@ it('validates settings only on the configuration panel, without exposing a model
   x.ctx.persist = (patch) => {
     updates.push(patch);
   };
-  expect(x.world.webUi().panels?.map((p) => p.title)).toEqual(['平台与记录', '配置']);
+  expect(x.world.webUi().panels?.map((p) => p.title)).toEqual(['互动记录', '配置']);
   await expect(
     x.world.webUi().invoke!('desk', 'settings', [{ 'worlds.socialmedia.roaming.enabled': true }]),
   ).rejects.toThrow(/配置页/);
@@ -403,8 +426,9 @@ it('exposes Kuaishou connection and independent owner focus in the desk snapshot
   expect(state.plannedPlatforms).not.toContain('kuaishou');
 });
 
-it('uses two cached frames for repeated observations and falls back to text after the daily budget', async () => {
+it('uses cached frames for repeated observations and falls back to text after the daily budget', async () => {
   const x = setup();
+  x.cfg.media.maxVideoFrames = 2;
   x.cfg.media.maxDailyVisualCalls = 2;
   const video = {
     aid: '99',
@@ -1117,4 +1141,49 @@ it('does not restart group quiet time after internal work while still respecting
     await x.world.stop();
     vi.useRealTimers();
   }
+});
+
+it('checks the configured background feed after local login completion and does not claim a failed check succeeded', async () => {
+  const x = setup();
+  x.cfg.platforms.douyin.enabled = true;
+  const dy = (x.world as any).douyin;
+  const close = vi.spyOn(dy, 'closeLogin').mockResolvedValue(undefined);
+  const connect = vi
+    .spyOn((x.world as any).service, 'connect')
+    .mockResolvedValue({ id: '42', name: '测试' });
+  const feed = vi.spyOn(dy, 'nextVideo').mockRejectedValue(new Error('人工验证仍未完成'));
+  const r = await x.world.webUi().invoke!('settings', 'douyinFinishLogin', []);
+  expect(close).toHaveBeenCalledOnce();
+  expect(connect).toHaveBeenCalledOnce();
+  expect(feed).toHaveBeenCalledOnce();
+  expect(r).toMatchObject({
+    detail: expect.stringContaining('账号已核对'),
+    backgroundReady: false,
+  });
+  expect((r as any).detail).toContain('人工验证仍未完成');
+});
+
+
+it('paginates actual gallery attachments by image number instead of sampling a video or substituting its cover', async () => {
+  const x = setup(), id = '7699999999999999999';
+  x.cfg.platforms.douyin.enabled = true;
+  x.cfg.media.maxFrames = 2;
+  vi.spyOn(x.world.douyin, 'video').mockResolvedValue({
+    id, aid: id, cid: id, kind: 'images', imageCount: 4, title: '四张图',
+    description: '', author: '', durationSec: 0, cover: '', url: 'https://www.douyin.com/video/' + id, parts: [],
+  });
+  const read = vi.spyOn(x.world.douyin, 'gallery').mockImplementation(async (_, indices) =>
+    indices.filter(i => i !== 2).map(i => ({ atSec: i, bytes: Buffer.alloc(1024, i) })));
+  const tool = x.world.tools().find(t => t.name === 'socialmedia_watch')!;
+  const first = await tool.handler({ platform: 'douyin', video: id }, {} as never);
+  if (typeof first === 'string') throw Error(first);
+  expect(JSON.parse(first.text!)).toMatchObject({ imageNumbers: [1], missingImages: [2], totalImages: 4, nextImageFrom: 3 });
+  const next = await tool.handler({ platform: 'douyin', video: id, imageFrom: 3, atSec: [1, 3] }, {} as never);
+  if (typeof next === 'string') throw Error(next);
+  expect(JSON.parse(next.text!)).toMatchObject({
+    imageNumbers: [3, 4], missingImages: [], nextImageFrom: null,
+    argumentNote: expect.stringContaining('秒数参数已忽略'),
+  });
+  expect(next.blobs).toHaveLength(2);
+  expect(read).toHaveBeenNthCalledWith(2, expect.objectContaining({ id }), [3, 4], expect.any(AbortSignal));
 });

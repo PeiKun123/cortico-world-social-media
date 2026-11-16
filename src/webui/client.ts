@@ -1,4 +1,5 @@
-import type { DouyinFailure } from '../platforms/douyin.ts';
+import { expressionSettings } from './expression.ts';
+import type { DouyinFailure, DouyinVerification } from '../platforms/douyin.ts';
 import type { GroupChats } from '../group-chat.ts';
 import type { DynamicPost } from '../dynamic-publishing.ts';
 import type { PublicDynamic } from '../platforms/bilibili-dynamics.ts';
@@ -10,17 +11,20 @@ import {
   type InteractionFilter,
 } from '../interactions.ts';
 import {
+  PUBLIC_POST_TRIAL_ENABLED,
   ROAMING_PRESETS,
   roamingConfig,
   SOCIALMEDIA_CONFIG_GROUP,
   type SocialMediaConfigSection,
   type RoamingConfig,
 } from '../config.ts';
+import { RESOURCE_DEFAULTS } from '../resource-policy.ts';
 import type { RoamSession } from '../roaming.ts';
 import type { WebUiPanelContext } from 'cortico/web/shared/client-panel.ts';
 import type { InboxItem, SendRecord, PublicVideo, PublicComment } from '../platform.ts';
 import './style.css';
 interface Snapshot {
+  recordsRevision?: string;
   dynamics?: {
     enabled: boolean;
     allowPublishing?: boolean;
@@ -33,6 +37,7 @@ interface Snapshot {
   resources?: {
     todayCalls: number;
     maxDailyVisualCalls: number;
+    unlimitedDailyVisualCalls?: boolean;
     publishedBytes: number;
     maxPublishedBytes: number;
     cacheBytes: number;
@@ -53,7 +58,14 @@ interface Snapshot {
   videos?: PublicVideo[];
   comments?: PublicComment[];
   stats?: { sent: number; unconfirmed: number };
-  douyin?: { running: boolean; loginOpen: boolean; detail: string; lastFailure?: DouyinFailure };
+  douyin?: {
+    running: boolean;
+    loginOpen: boolean;
+    detail: string;
+    lastFailure?: DouyinFailure;
+    windowHiding?: { enabled: boolean; state: string; active: boolean; detail?: string };
+    verification?: DouyinVerification;
+  };
   credentialSaved: boolean;
   publishing?: {
     transport: string;
@@ -293,12 +305,12 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
     details.append(el('summary', title));
     return details;
   }
-  const header = el('header');
+  const header = el('header', undefined, 'sm-tv-heading');
   header.append(
-    el('h2', settingsMode ? '按你的节奏，出去看看' : '在这里聊过'),
+    el('h2', '小鲸鱼爱冲浪'),
     el(
       'p',
-      settingsMode ? '账号、闲逛与交流边界，都在这里。' : '按视频收好每一次接话。',
+      settingsMode ? '平台与画面设置' : '互动记录',
       'sm-muted',
     ),
   );
@@ -318,7 +330,7 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
         ['可用', '视频详情、评论与楼中楼；可用字幕、可选画面采样；回复及@通知、特别关注与闲逛。'],
         [
           '边界',
-          '动态可读文字与图片数量，暂不创建动态；动态评论与主动@目前仅接口实验路径，默认网页仍只发视频评论。普通群聊未接入，画面采样另需FFmpeg。',
+          '动态读取、纯文字动态发布和主动 @ 为实验功能。发布回执、访客可见和 @ 通知送达需分别核对。画面采样另需 FFmpeg。',
         ],
       ],
     ],
@@ -542,6 +554,11 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
     );
     const status = el('p', '尚未检查' + title + '连接', 'sm-summary');
     status.setAttribute('aria-live', 'polite');
+    const hidingNote = el('p', '', 'sm-muted');
+    hidingNote.hidden = true;
+    const verificationNote = el('p', '', 'sm-summary sm-verification');
+    verificationNote.hidden = true;
+    verificationNote.setAttribute('role', 'status');
     const failureBox = fold('最近一次失败', 'sm-subsection sm-browser-failure');
     failureBox.hidden = true;
     const failureReport = el('pre', undefined, 'sm-failure-report');
@@ -613,8 +630,11 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
         },
         buttons,
       );
-    action('打开' + title + '登录窗口', id + 'Login');
-    action('完成' + title + '登录', id + 'FinishLogin');
+    const loginButton = action(
+      id === 'douyin' ? '打开登录／验证窗口' : '打开' + title + '登录窗口',
+      id + 'Login',
+    );
+    action(id === 'douyin' ? '完成登录并检查后台' : '完成' + title + '登录', id + 'FinishLogin');
     action('关闭' + title + '登录窗口', id + 'Close');
     const readButton = action('测试' + title + '读取', id + 'Check', true);
     const checks = fold('读取与连接检查', 'sm-subsection sm-connection-check');
@@ -625,14 +645,24 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
         feedButton,
         el(
           'p',
-          '使用当前后台设置检查推荐流，不需要填写链接，不会发评。官网要求人工验证时，请打开上方登录窗口完成验证；验证后仍可能需要再次检查。',
+          '使用当前后台设置检查推荐流，不需要填写链接，不会发评。已登录不代表后台可用；官网要求验证时，点击上方“处理人工验证”。完成后检查后台，若仍被拦可在连接选项主动选择兼容窗口模式。兼容模式可能显示任务栏图标。',
           'sm-muted',
         ),
       );
     }
     const switches = el('div', undefined, 'sm-controls');
     switches.append(enabled.parentElement!, posting.parentElement!);
-    section.append(status, switches, buttons, usageChecks(id), checks, failureBox, loginGuide(id));
+    section.append(
+      status,
+      switches,
+      verificationNote,
+      hidingNote,
+      buttons,
+      usageChecks(id),
+      checks,
+      failureBox,
+      loginGuide(id),
+    );
     return {
       section,
       status,
@@ -640,6 +670,29 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
       enabled,
       posting,
       render(state: Snapshot) {
+        const hiding = id === 'douyin' ? state.douyin?.windowHiding : undefined;
+        hidingNote.hidden = !hiding?.enabled;
+        if (hiding?.enabled)
+          hidingNote.textContent =
+            hiding.state === 'failed'
+              ? (hiding.detail ?? '隐藏失败，已使用原兼容方式。')
+              : hiding.active
+                ? '兼容浏览器窗口已隐藏；任务结束仍退出。'
+                : state.douyin?.loginOpen
+                  ? '登录／验证窗口保持可见。'
+                  : '隐藏兼容窗口已开启，浏览器按任务启动和退出。';
+        const verification = id === 'douyin' ? state.douyin?.verification : undefined;
+        verificationNote.hidden = !verification;
+        if (id === 'douyin') {
+          loginButton.textContent = verification ? '处理人工验证' : '打开登录／验证窗口';
+          if (verification)
+            verificationNote.textContent =
+              '已登录也可能被要求人工验证。检测到“' +
+              verification.pageTitle +
+              '”。' +
+              (verification.paused ? '同类自动访问已暂停。' : '已允许检查，原受阻页面仍待核对。') +
+              '点击“处理人工验证”打开上次受阻页面；已登录无需重复扫码。若可见窗口没有验证，点击“完成登录并检查后台”核对实际结果。推荐流通过不代表原作品和评论已恢复。';
+        }
         const failure = id === 'douyin' ? state.douyin?.lastFailure : undefined;
         failureBox.hidden = !failure;
         if (failure) {
@@ -755,21 +808,83 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
   );
   const douyinFocusStatus = el('p', '', 'sm-muted');
   douyinFocusSection.append(douyinFocusStatus);
-  const resourceSection = el('section', undefined, 'sm-config-section');
+  const resourceSection = el('section', undefined, 'sm-config-section sm-visual-card');
+  const visualKeys = {
+    calls: 'worlds.socialmedia.media.maxDailyVisualCalls',
+    frames: 'worlds.socialmedia.media.maxFrames',
+    video: 'worlds.socialmedia.media.maxVideoFrames',
+    unlimited: 'worlds.socialmedia.media.unlimitedDailyVisualCalls',
+  };
+  const videoModes = [
+    {
+      label: '低 · 扫一眼', video: 2, detail: '最多 2 帧 · 快速省钱',
+      use: '看题材或认个场景，适合去评论区接句话。容易漏掉剧情转折。',
+    },
+    {
+      label: '中 · 日常推荐', video: 9, detail: '最多 9 帧 · 通常一张分镜',
+      use: '适合日常看作品。五分钟视频约取 9 帧，可以顺着时间看大致过程。',
+    },
+    {
+      label: '高 · 看仔细', video: 12, detail: '取帧较多 · 超过 9 帧分两张',
+      use: '最多 12 帧，适合细看教程或多场景片段。取帧更慢，送给模型的图片可能更多；日常可用中档。',
+    },
+  ] as const;
+  const visualPresets = el('div', undefined, 'sm-presets sm-visual-presets');
+  visualPresets.setAttribute('role', 'group');
+  visualPresets.setAttribute('aria-label', '视频抽帧档位');
+  const visualCustom = fold('自定义次数和张数', 'sm-subsection sm-visual-custom');
+  const visualToday = el('p', '正在读取今日用量…', 'sm-visual-today');
+  let lastVisualLimit = RESOURCE_DEFAULTS.maxDailyVisualCalls;
+  function visualField(key: string) {
+    return extraInputs.get(key) as HTMLInputElement;
+  }
+  function changeNumber(key: string, value: number) {
+    const input = visualField(key);
+    input.value = String(value);
+    input.dispatchEvent(new Event('input'));
+  }
+  const visualToggle = el('button', '关闭画面', 'sm-visual-toggle');
+  visualToggle.type = 'button';
+  visualToggle.addEventListener('click', () => {
+    const current = Number(visualField(visualKeys.calls).value);
+    if (current > 0) lastVisualLimit = current;
+    changeNumber(visualKeys.calls, current > 0 ? 0 : lastVisualLimit);
+  }, { signal: ctx.signal });
+  const videoButtons = videoModes.map(mode => {
+    const option = el('button');
+    option.type = 'button';
+    option.append(el('strong', mode.label), el('span', mode.detail), el('small', mode.use));
+    option.addEventListener('click', () => {
+      changeNumber(visualKeys.video, mode.video);
+    }, { signal: ctx.signal });
+    visualPresets.append(option);
+    return option;
+  });
+  function syncVisualControls() {
+    const daily = visualField(visualKeys.calls);
+    const video = visualField(visualKeys.video);
+    const unlimited = visualField(visualKeys.unlimited);
+    if (!daily?.value || !video?.value || !unlimited) return;
+    const limit = Number(daily.value);
+    visualToggle.textContent = limit === 0 ? '开启画面' : '关闭画面';
+    daily.disabled = unlimited.checked && limit > 0;
+    videoButtons.forEach((option, index) => {
+      option.setAttribute('aria-pressed', String(Number(video.value) === videoModes[index].video));
+    });
+  }
+  const visualHeading = el('div', undefined, 'sm-visual-heading');
+  visualHeading.append(el('h3', '画面设置'), visualToggle);
   resourceSection.append(
-    el('h3', '观察与资源'),
-    el(
-      'p',
-      '默认先读文字与原评论，需要理解画面时再采样。图片缓存可回收；Cortico历史附件由宿主管理，累计图片预算只控制本World的新增交付。',
-      'sm-muted',
-    ),
+    visualHeading,
+    el('p', '按视频时长取帧，短片会少取。图片会增加模型输入，抽帧也占用本机资源。只回评论时可先读文字。', 'sm-muted'),
+    visualToday, visualPresets, visualCustom,
   );
-  const resourceAdvanced = el('details', undefined, 'sm-advanced');
-  resourceAdvanced.append(el('summary', '容量与保留策略'));
+  const resourceAdvanced = fold('高级 · 图片大小、缓存和 FFmpeg');
   resourceSection.append(resourceAdvanced);
-  const resourceStatus = el('p', '正在读取资源用量…', 'sm-summary'),
+  const resourceStatus = el('p', '', 'sm-muted'),
     resourceFeedback = el('p', '', 'sm-muted');
-  resourceSection.append(resourceStatus, resourceFeedback);
+  resourceAdvanced.append(resourceStatus);
+  resourceSection.append(resourceFeedback);
   button(
     '清理图片缓存',
     async () => {
@@ -817,7 +932,7 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
     groupStatus,
     el(
       'p',
-      '只监听你填写的群。首次保存后检查，固定真实会话；旧消息只作上下文。按间隔在后台读取，默认检查完成即释放浏览器；没有新消息不会反复唤醒。',
+      '只监听你填写的群。首次保存后检查，固定真实会话；旧消息只作上下文。群越多、间隔越短，后台读取越频繁。默认查完释放浏览器；没有新消息就不会反复唤醒小K。',
       'sm-muted',
     ),
   );
@@ -902,7 +1017,7 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
   );
   const dynamicFeedback = el(
     'p',
-    '读取与发布分别开启；纯文字动态需先准备草稿，发布与@结果分别核实，用完退出浏览器。',
+    '动态读取、纯文字发布和主动 @ 为实验功能，各自单独开启。发布后分别核对访客能否看到、对方是否收到 @。',
     'sm-muted',
   );
   biliSocial.append(dynamicFeedback);
@@ -969,7 +1084,13 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
       b.dataset.roamPreset = key;
       b.replaceChildren(
         el('strong', label),
-        el('small', key === 'free' ? '阅读不限量' : values.maxDailySessions + '轮/天'),
+        el('small', key === 'free' ? '阅读不限量 · 高消耗' : values.maxDailySessions + '轮/天'),
+        el('small', {
+          light: '空闲很久才逛，适合减少后台请求。',
+          balanced: '偶尔主动看新内容，适合日常。',
+          active: '更常看看有什么新内容，后台请求会增多。',
+          free: '空闲时可能多次唤醒小K。模型请求和网页访问都会变多，发评额度仍生效。',
+        }[key]),
       );
     }
     const fields = fold('自定义等待与额度');
@@ -986,6 +1107,89 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
     roamCards.set(id, card);
     roamFields.set(id, fields);
     roamStatuses.set(id, status);
+  }
+  type NumberPreset = readonly [number, string, string];
+  const numberPresets: Record<string, readonly NumberPreset[]> = {
+    maxDailyVisualCalls: [
+      [8, '8 次 · 偶尔看', '适合控制每日视觉用量。'],
+      [20, '20 次 · 日常推荐', '留给日常刷视频和翻几组图文。'],
+      [40, '40 次 · 经常看', '适合多平台频繁观察。'],
+    ],
+    maxFrames: [
+      [1, '1 张 · 先看一张', '适合扫封面或开头。'],
+      [2, '2 张 · 日常推荐', '兼顾开头和下一张内容。'],
+      [6, '6 张 · 多看几张', '适合连贯图文，单次送给模型的图会更多。'],
+    ],
+    pageWaitSeconds: [
+      [20, '20 秒 · 尽快返回', '页面通常很快时用，慢页面容易超时。'],
+      [45, '45 秒 · 日常推荐', '适合大多数作品和评论区。'],
+      [90, '90 秒 · 网络较慢', '给长时间加载的页面更多机会，加载完就继续。'],
+    ],
+    maxImageKB: [
+      [256, '256 KB · 省空间', '适合大致看画面，小字可能变糊。'],
+      [512, '512 KB · 日常推荐', '兼顾分镜可读性和附件体积。'],
+      [1024, '1024 KB · 保留细节', '适合字幕和图中文字，附件可能更大。'],
+    ],
+    cacheDays: [
+      [3, '3 天 · 少占空间', '适合很少回看旧作品。'],
+      [7, '7 天 · 日常推荐', '一周内回看可以复用缓存。'],
+      [14, '14 天 · 经常回看', '减少重复下载，缓存可能留得更久。'],
+    ],
+    maxCacheMB: [
+      [64, '64 MB · 轻量', '空间紧张时选，旧图更早退出缓存。'],
+      [200, '200 MB · 日常推荐', '适合日常跨平台回看。'],
+      [512, '512 MB · 经常回看', '适合重复打开很多作品。'],
+    ],
+    browserCacheMB: [
+      [64, '64 MB · 轻量', '适合较少使用网页。'],
+      [128, '128 MB · 日常推荐', '适合日常刷网页。'],
+      [256, '256 MB · 频繁读取', '可以缓存更多网页资源。'],
+    ],
+    historyDays: [
+      [30, '30 天 · 最近一个月', '更早记录较早归档。'],
+      [90, '90 天 · 日常推荐', '近期视图保留较长时间。'],
+      [180, '180 天 · 回看半年', '较久以前的详细发言留在近期区更久。'],
+    ],
+    minIntervalSec: [
+      [30, '30 秒 · 回得较快', '适合需要及时跟上对话的场合。'],
+      [60, '60 秒 · 日常推荐', '连续发言之间留出一点间隔。'],
+      [180, '180 秒 · 放慢频率', '适合不希望密集发言的频道。'],
+    ],
+    pollIntervalSec: [
+      [30, '30 秒 · 更及时', '更快发现消息，网页检查也更频繁。'],
+      [60, '60 秒 · 日常推荐', '兼顾响应速度和后台请求。'],
+      [180, '180 秒 · 少打扰', '后台请求更少，新消息可能晚一些出现。'],
+    ],
+    autoReplyIntervalMinutes: [
+      [2, '2 分钟 · 回得更快', '适合新作品发布后集中看评论。'],
+      [5, '5 分钟 · 日常推荐', '通常能及时发现新评论。'],
+      [15, '15 分钟 · 减少检查', '适合更新较少的作品。'],
+    ],
+    intervalMinutes: [
+      [15, '15 分钟 · 经常看看', '适合关注对象更新较频繁。'],
+      [60, '60 分钟 · 日常推荐', '每小时看一次近期作品。'],
+      [180, '180 分钟 · 偶尔看看', '减少后台检查，适合更新少的账号。'],
+    ],
+    maxDailyReplies: [
+      [5, '5 条 · 少量回应', '适合只回复几条最相关的通知。'],
+      [20, '20 条 · 日常', '给活跃评论区留出更多回应空间。'],
+      [40, '40 条 · 通知多', '适合确实收到较多通知的账号。'],
+    ],
+    maxVideos: [
+      [3, '3 个 · 只看最近', '适合更新少或只关心最近作品的账号。'],
+      [8, '8 个 · 日常', '最近发布的多条作品都能纳入检查。'],
+      [15, '15 个 · 追得更远', '检查范围更广，每轮读取可能更久。'],
+    ],
+  };
+  const numberControls = new Map<string, { buttons: HTMLButtonElement[]; choices: readonly NumberPreset[] }>();
+  function syncNumberPreset(path: string) {
+    const control = numberControls.get(path);
+    const input = extraInputs.get(path);
+    if (!control || !input) return;
+    control.buttons.forEach((option, index) => {
+      option.disabled = input.disabled;
+      option.setAttribute('aria-pressed', String(input.value === String(control.choices[index][0])));
+    });
   }
   const excluded = new Set([
     'worlds.socialmedia.platforms.kuaishou.enabled',
@@ -1020,9 +1224,11 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
               ? roamCards.get(roamPath[1])!
               : roamFields.get(roamPath[1])!
             : path.startsWith('worlds.socialmedia.media.')
-              ? ['textFirst', 'maxDailyVisualCalls', 'maxFrames'].includes(path.split('.').at(-1)!)
+              ? path === visualKeys.unlimited
                 ? resourceSection
-                : resourceAdvanced
+                : path === visualKeys.calls || path === visualKeys.frames || path === visualKeys.video
+                  ? visualCustom
+                  : resourceAdvanced
               : path.startsWith('worlds.socialmedia.focus.')
                 ? isFocusPrimary(path)
                   ? focusSection
@@ -1052,6 +1258,8 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
     const copy = el('span');
     copy.append(el('strong', prop.title));
     if (prop.description) copy.append(el('small', prop.description));
+    if (prop.type === 'integer' && prop.minimum !== undefined && prop.maximum !== undefined)
+      copy.append(el('small', '可填 ' + prop.minimum + '–' + prop.maximum));
     let input: HTMLInputElement | HTMLSelectElement;
     if (prop.enum) {
       const select = el('select');
@@ -1087,6 +1295,12 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
       input = field;
     }
     input.setAttribute('aria-label', prop.title);
+    const help = [...copy.querySelectorAll('small')];
+    if (help.length) {
+      const idBase = (settingsMode ? 'sm-setting-' : 'sm-panel-') + path;
+      help.forEach((line, index) => { line.id = idBase + '-' + index; });
+      input.setAttribute('aria-describedby', help.map(line => line.id).join(' '));
+    }
     input.addEventListener(
       'input',
       () => {
@@ -1105,13 +1319,40 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
           }
         }
         refreshSaveHints();
+        if (path === visualKeys.calls || path === visualKeys.frames || path === visualKeys.video || path === visualKeys.unlimited)
+          syncVisualControls();
+        syncNumberPreset(path);
+        if (path === visualKeys.unlimited) syncNumberPreset(visualKeys.calls);
         feedback.hidden = true;
       },
       { signal: ctx.signal },
     );
     extraInputs.set(path, input);
     label.append(copy, input);
-    parent.append(label);
+    if (path === visualKeys.unlimited) {
+      label.classList.add('sm-visual-unlimited');
+      resourceSection.insertBefore(label, visualCustom);
+    } else parent.append(label);
+    const key = path.split('.').at(-1)!;
+    const presetKey = key === 'intervalSec' || key === 'pollSeconds' ? 'pollIntervalSec' : key;
+    const choices = numberPresets[presetKey]?.filter(([value]) =>
+      value >= (prop.minimum ?? 0) && value <= (prop.maximum ?? Infinity),
+    );
+    if (prop.type === 'integer' && choices && choices.length >= 2) {
+      const presets = el('div', undefined, 'sm-number-presets');
+      presets.setAttribute('role', 'group');
+      presets.setAttribute('aria-label', prop.title + '预设');
+      const buttons = choices.map(([value, name, hint]) => {
+        const option = el('button', name);
+        option.type = 'button';
+        option.append(el('small', hint));
+        option.addEventListener('click', () => changeNumber(path, value), { signal: ctx.signal });
+        presets.append(option);
+        return option;
+      });
+      numberControls.set(path, { buttons, choices });
+      label.after(presets);
+    }
   }
   const saveExtras = async (scope: SaveScope) => {
     const values: Record<string, unknown> = {};
@@ -1151,7 +1392,7 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
       }
     }
   };
-  button('保存观察与资源设置', () => saveExtras('resources'), resourceSection);
+  button('保存画面设置', () => saveExtras('resources'), resourceSection).classList.add('sm-save-visual');
   resourceSection.append(maintenance);
   function platformSave(id: 'bilibili' | 'douyin' | 'kuaishou', title: string) {
     const bar = el('div', undefined, 'sm-platform-savebar'),
@@ -1202,7 +1443,22 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
     advanced,
     saveBilibili,
   );
+  const douyinNotifications = fold('通知与 @');
+  douyinNotifications.append(
+    el('p', '当前可以扫描特别关注作品下的评论，并回复已核对的原楼层。', 'sm-muted'),
+    el('p', '全站收到的 @、别人回复 Bot，以及在评论中主动插入 @ 标记仍待接入。', 'sm-muted'),
+  );
+  button('打开抖音专用窗口', async () => {
+    const result = await ctx.invoke<{ detail: string }>('douyinLogin');
+    feedback.textContent = result.detail + ' 可在官网顶部手动查看「通知」。';
+    feedback.hidden = false;
+  }, douyinNotifications);
+  const kuaishouBoundary = el(
+    'p', '实验接入。普通视频可尝试读详情、评论和主评；楼中楼的公开可见性仍需核对。图文发评和视频抽帧暂未接入。', 'sm-platform-boundary',
+  );
+  kuaishouSection.insertBefore(kuaishouBoundary, kuaishouSection.children[1] ?? null);
   douyinSection.append(
+    douyinNotifications,
     roamCards.get('douyin')!,
     douyinFocusSection,
     groupSection,
@@ -1238,7 +1494,13 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
     ctx.memo?.set('settings-platform', id);
   }
   for (const [id, title, panel] of platformPanels) {
-    const tab = el('button', title);
+    const tab = el('button');
+    const badge = el('small', '正在读取状态', 'sm-channel-status');
+    const name = el('strong', title);
+    const experimental = id === 'douyin' || id === 'kuaishou';
+    if (experimental) name.append(el('span', '实验', 'sm-experimental'));
+    tab.append(name, badge);
+    tab.setAttribute('aria-label', experimental ? title + '（实验）' : title);
     tab.type = 'button';
     tab.dataset.platform = id;
     tab.id = prefix + '-tab-' + id;
@@ -1275,14 +1537,20 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
   }
   const remembered = ctx.memo?.get<string>('settings-platform', 'bilibili');
   selectPlatform(platformButtons.has(remembered ?? '') ? remembered! : 'bilibili');
-  settings.append(
-    roamSection,
-    platformTabs,
-    accountSection,
-    douyinSection,
-    kuaishouSection,
-    resourceSection,
-  );
+  const layoutLinks = el('div', undefined, 'sm-layout-links');
+  const jumpVisual = el('button', '画面设置 ↓');
+  jumpVisual.type = 'button';
+  resourceSection.tabIndex = -1;
+  jumpVisual.addEventListener('click', () => {
+    resourceSection.focus({ preventScroll: true });
+    resourceSection.scrollIntoView({ block: 'start' });
+  }, { signal: ctx.signal });
+  layoutLinks.append(el('h3', '平台'), jumpVisual);
+  const platformColumn = el('div', undefined, 'sm-primary');
+  platformColumn.append(layoutLinks, platformTabs, accountSection, douyinSection, kuaishouSection);
+  const settingsRail = el('aside', undefined, 'sm-rail');
+  settingsRail.append(resourceSection, roamSection);
+  settings.append(platformColumn, settingsRail);
   ctx.guardLeave?.(() => (dirtyExtras.size ? '还有未保存的设置，离开将放弃这些修改。' : null));
   const overview = el('div', undefined, 'sm-overview');
   const metrics = new Map<string, HTMLElement>();
@@ -1295,13 +1563,13 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
   }
   const feed = el('section', undefined, 'sm-feed');
   const feedHeading = el('div', undefined, 'sm-feed-heading');
-  feedHeading.append(
-    el('h3', '视频与对话'),
-    el('span', '点开一条视频，查看这里的完整交流。', 'sm-muted'),
-  );
+  feedHeading.append(el('h3', '作品与对话'));
   const feedToolbar = el('div', undefined, 'sm-feed-toolbar'),
     filters = el('div', undefined, 'sm-filters');
   filters.setAttribute('aria-label', '互动筛选');
+  let workPage = 0;
+  let stableWorkKeys: string[] = [];
+  const entryPages = new Map<string, number>();
   let activeFilter: InteractionFilter = 'all',
     lastState: Snapshot | undefined,
     lastDigest = '',
@@ -1317,6 +1585,7 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
       label,
       async () => {
         activeFilter = key;
+        workPage = 0;
         lastDigest = '';
         if (lastState) renderTimeline(lastState, true);
       },
@@ -1332,6 +1601,7 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
   search.addEventListener(
     'input',
     () => {
+      workPage = 0;
       lastDigest = '';
       if (lastState) renderTimeline(lastState, true);
     },
@@ -1350,6 +1620,7 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
   order.addEventListener(
     'change',
     () => {
+      workPage = 0;
       lastDigest = '';
       if (lastState) renderTimeline(lastState, true);
     },
@@ -1359,6 +1630,8 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
     '有新动态 · 回到最新',
     async () => {
       order.value = 'newest';
+      workPage = 0;
+      newest.hidden = true;
       lastDigest = '';
       if (lastState) renderTimeline(lastState, true);
       feed.scrollIntoView({ block: 'start', behavior: 'auto' });
@@ -1368,9 +1641,48 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
   newest.hidden = true;
   feedToolbar.prepend(filters, search, order);
   const timeline = el('div', undefined, 'sm-list sm-timeline');
-
+  const loadingRecords = el('p', '正在读取互动记录…', 'sm-empty');
+  loadingRecords.setAttribute('role', 'status');
+  timeline.append(loadingRecords);
   timeline.setAttribute('aria-label', '互动时间线');
-  feed.append(feedHeading, feedToolbar, timeline);
+  function renderPager(
+    nav: HTMLElement,
+    current: number,
+    total: number,
+    info: string,
+    change: (page: number) => void,
+  ) {
+    nav.replaceChildren(el('span', info, 'sm-pagination-status'));
+    const add = (label: string, page: number, disabled = false) => {
+      const b = button(
+        label,
+        async () => {
+          if (page !== current) change(page);
+        },
+        nav,
+      );
+      b.disabled = disabled;
+      return b;
+    };
+    add('上一页', current - 1, current === 0);
+    const pages = [
+      ...new Set([0, total - 1, ...Array.from({ length: 5 }, (_, i) => current + i - 2)]),
+    ]
+      .filter((i) => i >= 0 && i < total)
+      .sort((a, b) => a - b);
+    let previous = -1;
+    for (const page of pages) {
+      if (page > previous + 1) nav.append(el('span', '…', 'sm-page-gap'));
+      const b = add(String(page + 1), page);
+      b.classList.add('sm-page-number');
+      if (page === current) b.setAttribute('aria-current', 'page');
+      previous = page;
+    }
+    add('下一页', current + 1, current >= total - 1);
+  }
+  const workPager = el('nav', undefined, 'sm-toolbar sm-pagination sm-work-pager');
+  workPager.setAttribute('aria-label', '作品分页');
+  feed.append(feedHeading, feedToolbar, workPager, timeline);
   const kuaishouFocusPanel = focusView(
     async () => {
       await perform(async () => {
@@ -1581,22 +1893,41 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
   const dynamicPostBody = el('div', undefined, 'sm-focus-body');
   dynamicPosts.append(dynamicPostBody);
   dynamicRecords.append(dynamicBody);
-  if (settingsMode) root.append(header, capabilities, alert, feedback, settings);
-  else
-    root.append(
-      header,
-      capabilities,
-      alert,
-      summary,
+  root.append(header, alert);
+  if (settingsMode) {
+    settingsRail.append(capabilities);
+    const experiments = expressionSettings(ctx);
+    if (PUBLIC_POST_TRIAL_ENABLED) {
+      const publicLinks = el('div', undefined, 'sm-public-links');
+      for (const [platform, label] of [['tieba', '百度贴吧'], ['xiaohongshu', '小红书']] as const) {
+        const button = el('button', label + ' · 试读');
+        button.append(el('span', '实验', 'sm-experimental'));
+        button.setAttribute('aria-label', label + ' · 试读（实验）');
+        button.type = 'button';
+        button.addEventListener('click', () => experiments.openPublic(platform), { signal: ctx.signal });
+        publicLinks.append(button);
+      }
+      platformTabs.after(publicLinks);
+    }
+    root.append(feedback, settings, experiments.element);
+  } else {
+    const layout = el('div', undefined, 'sm-record-layout');
+    const side = el('aside', undefined, 'sm-rail sm-activity');
+    side.append(
+      el('h3', '互动概况'),
       overview,
+      summary,
       focusPanel.element,
       douyinFocusPanel.element,
       kuaishouFocusPanel.element,
       groupRecords,
       dynamicRecords,
       dynamicPosts,
-      feed,
+      capabilities,
     );
+    layout.append(feed, side);
+    root.append(layout);
+  }
   let archivedRecords: Snapshot['outbox'] = [],
     archiveOffset = 0;
   const archiveButton = button(
@@ -1626,13 +1957,12 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
     for (const [key, b] of filterButtons)
       b.setAttribute('aria-pressed', String(activeFilter === key));
     const digest = JSON.stringify([
-      state.inbox,
-      state.outbox,
-      state.videos,
-      state.comments,
+      state.recordsRevision ?? [state.inbox, state.outbox, state.videos, state.comments],
+      archiveOffset,
       activeFilter,
       search.value,
       order.value,
+      workPage,
       activeFilter === 'roam' ? state.roaming?.recent : undefined,
     ]);
     if (digest === lastDigest && !reset) return;
@@ -1651,9 +1981,6 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
     const anchor = visible
       ? { id: visible.dataset.anchor, offset: visible.getBoundingClientRect().top }
       : undefined;
-    const existingKeys = [...timeline.querySelectorAll<HTMLElement>('.sm-video')].map(
-      (n) => n.dataset.groupKey,
-    );
     for (const n of timeline.querySelectorAll<HTMLDetailsElement>('.sm-video')) {
       if (n.dataset.autoExpansion === 'true') continue;
       if (n.open) expanded.add(n.dataset.groupKey!);
@@ -1668,21 +1995,46 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
     const all = buildInteractions(state.inbox, state.outbox, state.videos, state.comments),
       groups = filterInteractions(all, activeFilter, search.value);
     if (order.value === 'oldest') groups.reverse();
-    if (!reset && existingKeys.length)
-      groups.sort((a, b) => {
-        const ai = existingKeys.indexOf(a.key),
-          bi = existingKeys.indexOf(b.key);
-        return (ai < 0 ? existingKeys.length : ai) - (bi < 0 ? existingKeys.length : bi);
-      });
+    if (!reset && (workPage > 0 || !nearEdge) && stableWorkKeys.length) {
+      const positions = new Map(stableWorkKeys.map((key, index) => [key, index]));
+      groups.sort(
+        (a, b) =>
+          (positions.get(a.key) ?? positions.size) - (positions.get(b.key) ?? positions.size),
+      );
+    }
+    stableWorkKeys = groups.map((g) => g.key);
     const currentIds = new Set(
       all.flatMap((g) => g.threads.flatMap((t) => t.entries.map((e) => e.id))),
     );
-    if (!reset && !nearEdge && latestIds.size && [...currentIds].some((id) => !latestIds.has(id)))
+    if (
+      !reset &&
+      (workPage > 0 || !nearEdge) &&
+      latestIds.size &&
+      [...currentIds].some((id) => !latestIds.has(id))
+    )
       newest.hidden = false;
     latestIds = currentIds;
     lastDigest = digest;
     timeline.replaceChildren();
-    for (const group of groups) {
+    const workPages = Math.max(1, Math.ceil(groups.length / 20));
+    workPage = Math.max(0, Math.min(workPage, workPages - 1));
+    workPager.hidden = groups.length === 0;
+    renderPager(
+      workPager,
+      workPage,
+      workPages,
+      '共' + groups.length + '个作品 · 第' + (workPage + 1) + ' / ' + workPages + '页 · 每页20个',
+      (page) => {
+        workPage = page;
+        lastDigest = '';
+        if (lastState) renderTimeline(lastState, true);
+        workPager.scrollIntoView({ block: 'start', behavior: 'auto' });
+        workPager
+          .querySelector<HTMLButtonElement>('[aria-current=page]')
+          ?.focus({ preventScroll: true });
+      },
+    );
+    for (const group of groups.slice(workPage * 20, (workPage + 1) * 20)) {
       const section = el('details', undefined, 'sm-video');
       section.dataset.platform = group.platform;
       section.dataset.groupKey = group.key;
@@ -1694,6 +2046,14 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
       section.addEventListener(
         'toggle',
         () => {
+          if (!section.isConnected) return;
+          if (section.open) drawBody();
+          else {
+            for (const n of body?.querySelectorAll<HTMLDetailsElement>('details[open]') ?? [])
+              opened.add(n.dataset.keepKey);
+            body?.remove();
+            body = undefined;
+          }
           if (section.isConnected && section.dataset.autoExpansion !== 'true') {
             if (section.open) expanded.add(group.key);
             else expanded.delete(group.key);
@@ -1735,150 +2095,209 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
       side.append(el('time', prettyTime(group.latestAt)), el('span', '展开对话', 'sm-open-label'));
       head.append(title, side);
       section.append(head);
-      const open = el('div', undefined, 'sm-video-tools');
-      link('打开视频 ↗', group.video.url, open);
-      section.append(open);
-      const threads = order.value === 'oldest' ? [...group.threads].reverse() : group.threads;
-      for (const thread of threads) {
-        const threadEl = el('div', undefined, 'sm-thread');
-        for (const e of thread.entries) {
-          const card = el('article', undefined, 'sm-event sm-' + e.direction);
-          card.dataset.platform = group.platform;
-          card.dataset.eventId = e.id;
-          card.dataset.anchor = e.id;
-          const meta = el('div', undefined, 'sm-event-meta');
-          const tags = el('div', undefined, 'sm-tags');
-          tags.append(el('span', e.kind, 'sm-tag'));
-          tags.append(
-            el(
-              'span',
-              e.status,
-              'sm-tag ' +
-                (e.pending
-                  ? 'sm-tag-wait'
-                  : e.status === '访客可见'
-                    ? 'sm-tag-good'
-                    : ['仅自己可见', '未发出', '发送待核对'].includes(e.status)
-                      ? 'sm-tag-note'
-                      : ''),
-            ),
-          );
-          if (e.inbox?.retryAt && Date.parse(e.inbox.retryAt) > Date.now()) {
-            const tag = el('span', '稍后考虑', 'sm-tag sm-tag-quiet');
-            tag.title = prettyTime(e.inbox.retryAt) + '后再考虑';
-            tags.append(tag);
-          }
-          if (e.record?.roamId) tags.append(el('span', '闲逛', 'sm-tag sm-tag-quiet'));
-          const when = el('time', prettyTime(e.at));
-          when.dateTime = new Date(e.at).toISOString();
-          meta.append(tags, when);
-          card.append(
-            meta,
-            el('strong', e.direction === 'incoming' ? e.author : '我的发言', 'sm-speaker'),
-          );
-          if (
-            e.quote?.text &&
-            !thread.entries.some(
-              (i) => i.direction === 'incoming' && i.target.parent === e.quote?.target.parent,
+      let body: HTMLDivElement | undefined;
+      const drawBody = () => {
+        if (body) return;
+        body = el('div', undefined, 'sm-video-body');
+        section.append(body);
+        const totalEntryPages = Math.max(1, Math.ceil(entries.length / 40));
+        const entryPage = Math.max(
+          0,
+          Math.min(entryPages.get(group.key) ?? 0, totalEntryPages - 1),
+        );
+        entryPages.set(group.key, entryPage);
+        const selected = new Set(
+          [...entries]
+            .sort(
+              (a, b) =>
+                (activeFilter === 'pending' ? Number(b.pending) - Number(a.pending) : 0) ||
+                (order.value === 'oldest' ? a.at - b.at : b.at - a.at),
             )
-          ) {
-            const quote = el('blockquote');
-            quote.append(
-              el('span', e.quote.author ? '回复 ' + e.quote.author : '回复原评论', 'sm-muted'),
-              el('p', e.quote.text),
-            );
-            card.append(quote);
-          }
-          if (e.text.length > 260) {
-            const body = el('details', undefined, 'sm-long-message');
-            body.dataset.keepKey = 'body:' + e.id;
-            body.open = opened.has(body.dataset.keepKey);
-            const summary = el('summary');
-            const preview = el('span', e.text.slice(0, 110) + '…', 'sm-preview'),
-              more = el('span', body.open ? '收起正文' : '展开全文', 'sm-more');
-            summary.append(preview, more);
-            body.append(summary, el('p', e.text, 'sm-body'));
-            body.addEventListener(
-              'toggle',
-              () => {
-                more.textContent = body.open ? '收起正文' : '展开全文';
-              },
-              { signal: ctx.signal },
-            );
-            card.append(body);
-          } else card.append(el('p', e.text, 'sm-body'));
-          const actions = el('div', undefined, 'sm-event-actions');
-          link(e.record && !e.record.receiptId ? '查看原楼层 ↗' : '定位这条评论 ↗', e.url, actions);
-          if (e.inbox?.status === 'pending')
-            button(
-              '标记已处理',
-              async () => {
-                await ctx.invoke('handled', [e.inbox!.id]);
-                await refresh();
-              },
-              actions,
-            );
-
-          if (e.record?.status === 'unknown') {
-            const receipt = el('input');
-            receipt.placeholder = '核实后的评论编号';
-            receipt.setAttribute('aria-label', '核实后的评论编号');
-            actions.append(receipt);
-            button(
-              '已核实发布',
-              async () => {
-                await ctx.invoke('resolve', [e.record!.id, 'sent', receipt.value]);
-                await refresh();
-              },
-              actions,
-            );
-            button(
-              '已核实未发布',
-              async () => {
-                await ctx.invoke('resolve', [e.record!.id, 'rejected']);
-                await refresh();
-              },
-              actions,
-            );
-          }
-          if (e.inbox?.handling) card.append(el('p', e.inbox.handling.reason, 'sm-muted'));
-          card.append(actions);
-          if (e.record) {
-            const r = e.record,
-              detail = el('details', undefined, 'sm-receipt');
-            detail.dataset.keepKey = e.id;
-            detail.open = opened.has(e.id);
-            detail.append(el('summary', '回执与发言前整理'));
-            if (r.preparation) {
-              detail.append(el('p', '发言目的：' + r.preparation.purpose));
-              if (r.preparation.judgment)
-                detail.append(el('p', r.preparation.judgment.reason, 'sm-muted'));
-              for (const advice of r.preparation.advice) detail.append(el('p', advice, 'sm-muted'));
-              if (r.preparation.video?.observation)
-                detail.append(el('p', r.preparation.video.observation, 'sm-muted'));
-            }
-            if (r.detail) detail.append(el('p', r.detail, 'sm-muted'));
-            if (r.visibility)
-              detail.append(
-                el('p', r.visibility.detail, 'sm-muted'),
-                el('small', '核验于 ' + prettyTime(r.visibility.checkedAt)),
-              );
-            detail.append(
+            .slice(entryPage * 40, (entryPage + 1) * 40)
+            .map((e) => e.id),
+        );
+        const open = el('div', undefined, 'sm-video-tools');
+        link('打开视频 ↗', group.video.url, open);
+        body.append(open);
+        const threads = order.value === 'oldest' ? [...group.threads].reverse() : group.threads;
+        for (const thread of threads) {
+          const threadEl = el('div', undefined, 'sm-thread');
+          for (const e of thread.entries) {
+            if (!selected.has(e.id)) continue;
+            const card = el('article', undefined, 'sm-event sm-' + e.direction);
+            card.dataset.platform = group.platform;
+            card.dataset.eventId = e.id;
+            card.dataset.anchor = e.id;
+            const meta = el('div', undefined, 'sm-event-meta');
+            const tags = el('div', undefined, 'sm-tags');
+            tags.append(el('span', e.kind, 'sm-tag'));
+            tags.append(
               el(
-                'small',
-                (r.transport === 'api'
-                  ? '接口发送'
-                  : r.transport === 'browser'
-                    ? '后台网页发送'
-                    : '发送记录') + (r.receiptId ? ' · 评论 ' + r.receiptId : ''),
+                'span',
+                e.status,
+                'sm-tag ' +
+                  (e.pending
+                    ? 'sm-tag-wait'
+                    : e.status === '访客可见'
+                      ? 'sm-tag-good'
+                      : ['仅自己可见', '未发出', '发送待核对'].includes(e.status)
+                        ? 'sm-tag-note'
+                        : ''),
               ),
             );
-            card.append(detail);
+            if (e.inbox?.retryAt && Date.parse(e.inbox.retryAt) > Date.now()) {
+              const tag = el('span', '稍后考虑', 'sm-tag sm-tag-quiet');
+              tag.title = prettyTime(e.inbox.retryAt) + '后再考虑';
+              tags.append(tag);
+            }
+            if (e.record?.roamId) tags.append(el('span', '闲逛', 'sm-tag sm-tag-quiet'));
+            const when = el('time', prettyTime(e.at));
+            when.dateTime = new Date(e.at).toISOString();
+            meta.append(tags, when);
+            card.append(
+              meta,
+              el('strong', e.direction === 'incoming' ? e.author : '我的发言', 'sm-speaker'),
+            );
+            if (
+              e.quote?.text &&
+              !thread.entries.some(
+                (i) =>
+                  selected.has(i.id) &&
+                  i.direction === 'incoming' &&
+                  i.target.parent === e.quote?.target.parent,
+              )
+            ) {
+              const quote = el('blockquote');
+              quote.append(
+                el('span', e.quote.author ? '回复 ' + e.quote.author : '回复原评论', 'sm-muted'),
+                el('p', e.quote.text),
+              );
+              card.append(quote);
+            }
+            if (e.text.length > 260) {
+              const body = el('details', undefined, 'sm-long-message');
+              body.dataset.keepKey = 'body:' + e.id;
+              body.open = opened.has(body.dataset.keepKey);
+              const summary = el('summary');
+              const preview = el('span', e.text.slice(0, 110) + '…', 'sm-preview'),
+                more = el('span', body.open ? '收起正文' : '展开全文', 'sm-more');
+              summary.append(preview, more);
+              body.append(summary, el('p', e.text, 'sm-body'));
+              body.addEventListener(
+                'toggle',
+                () => {
+                  more.textContent = body.open ? '收起正文' : '展开全文';
+                },
+                { signal: ctx.signal },
+              );
+              card.append(body);
+            } else card.append(el('p', e.text, 'sm-body'));
+            const actions = el('div', undefined, 'sm-event-actions');
+            link(
+              e.record && !e.record.receiptId ? '查看原楼层 ↗' : '定位这条评论 ↗',
+              e.url,
+              actions,
+            );
+            if (e.inbox?.status === 'pending')
+              button(
+                '标记已处理',
+                async () => {
+                  await ctx.invoke('handled', [e.inbox!.id]);
+                  await refresh();
+                },
+                actions,
+              );
+
+            if (e.record?.status === 'unknown') {
+              const receipt = el('input');
+              receipt.placeholder = '核实后的评论编号';
+              receipt.setAttribute('aria-label', '核实后的评论编号');
+              actions.append(receipt);
+              button(
+                '已核实发布',
+                async () => {
+                  await ctx.invoke('resolve', [e.record!.id, 'sent', receipt.value]);
+                  await refresh();
+                },
+                actions,
+              );
+              button(
+                '已核实未发布',
+                async () => {
+                  await ctx.invoke('resolve', [e.record!.id, 'rejected']);
+                  await refresh();
+                },
+                actions,
+              );
+            }
+            if (e.inbox?.handling) card.append(el('p', e.inbox.handling.reason, 'sm-muted'));
+            card.append(actions);
+            if (e.record) {
+              const r = e.record,
+                detail = el('details', undefined, 'sm-receipt');
+              detail.dataset.keepKey = e.id;
+              detail.open = opened.has(e.id);
+              detail.append(el('summary', '回执与发言前整理'));
+              if (r.preparation) {
+                detail.append(el('p', '发言目的：' + r.preparation.purpose));
+                if (r.preparation.judgment)
+                  detail.append(el('p', r.preparation.judgment.reason, 'sm-muted'));
+                for (const advice of r.preparation.advice)
+                  detail.append(el('p', advice, 'sm-muted'));
+                if (r.preparation.video?.observation)
+                  detail.append(el('p', r.preparation.video.observation, 'sm-muted'));
+              }
+              if (r.detail) detail.append(el('p', r.detail, 'sm-muted'));
+              if (r.visibility)
+                detail.append(
+                  el('p', r.visibility.detail, 'sm-muted'),
+                  el('small', '核验于 ' + prettyTime(r.visibility.checkedAt)),
+                );
+              detail.append(
+                el(
+                  'small',
+                  (r.transport === 'api'
+                    ? '接口发送'
+                    : r.transport === 'browser'
+                      ? '后台网页发送'
+                      : '发送记录') + (r.receiptId ? ' · 评论 ' + r.receiptId : ''),
+                ),
+              );
+              card.append(detail);
+            }
+            threadEl.append(card);
           }
-          threadEl.append(card);
+          if (threadEl.childElementCount) body.append(threadEl);
         }
-        section.append(threadEl);
-      }
+        if (totalEntryPages > 1) {
+          const pager = el('nav', undefined, 'sm-toolbar sm-pagination sm-entry-pager');
+          pager.setAttribute('aria-label', '对话分页');
+          renderPager(
+            pager,
+            entryPage,
+            totalEntryPages,
+            '共' +
+              entries.length +
+              '条 · 第' +
+              (entryPage + 1) +
+              ' / ' +
+              totalEntryPages +
+              '页 · 每页40条',
+            (page) => {
+              entryPages.set(group.key, page);
+              body?.remove();
+              body = undefined;
+              drawBody();
+              head.scrollIntoView({ block: 'start', behavior: 'auto' });
+              section
+                .querySelector<HTMLButtonElement>('.sm-entry-pager [aria-current=page]')
+                ?.focus({ preventScroll: true });
+            },
+          );
+          body.append(pager);
+        }
+      };
+      if (section.open) drawBody();
       timeline.append(section);
     }
     if (activeFilter === 'roam' && state.roaming?.recent.length) {
@@ -1924,8 +2343,10 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
       const restored = [...timeline.querySelectorAll<HTMLElement>('[data-anchor]')].find(
         (n) => n.dataset.anchor === anchor.id,
       );
-      if (restored)
-        scroller.scrollTop = oldTop + restored.getBoundingClientRect().top - anchor.offset;
+      if (restored) {
+        const shift = restored.getBoundingClientRect().top - anchor.offset;
+        scroller.scrollTop += shift;
+      }
     }
   }
   async function perform(action: () => Promise<void>, b?: HTMLButtonElement) {
@@ -1987,6 +2408,14 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
     const p = state.platforms.find((p) => p.id === 'bilibili');
     const dy = state.platforms.find((p) => p.id === 'douyin');
     const ks = state.platforms.find((p) => p.id === 'kuaishou');
+    for (const [id, tab] of platformButtons) {
+      const platform = state.platforms.find((entry) => entry.id === id);
+      const badge = tab.querySelector('small')!;
+      const status = !platform?.enabled ? '未启用' : platform.error ? '连接待检查'
+        : platform.account ? '已连接' : '已启用 · 登录待核对';
+      badge.textContent = status;
+      badge.dataset.connected = String(Boolean(platform?.enabled && platform.account && !platform.error));
+    }
     refreshSaveHints();
     dyControls.render(state);
     ksControls.render(state);
@@ -2034,6 +2463,8 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
         else input.value = String(value ?? '');
       }
     }
+    syncVisualControls();
+    for (const path of numberControls.keys()) syncNumberPreset(path);
     enabled.checked = p?.enabled ?? state.config?.platforms.bilibili?.enabled ?? false;
     monitor.checked = p?.monitor ?? state.config?.platforms.bilibili?.monitor.enabled ?? false;
     posting.checked = p?.posting ?? state.config?.platforms.bilibili?.posting.enabled ?? false;
@@ -2140,12 +2571,12 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
     const rsrc = state.resources;
     if (rsrc) {
       const mb = (n: number) => (n / 1048576).toFixed(1) + 'MB';
+      visualToday.textContent = rsrc.maxDailyVisualCalls === 0
+        ? '画面已关闭 · 今日已看 ' + rsrc.todayCalls + ' 次'
+        : '今天已看 ' + rsrc.todayCalls +
+          (rsrc.unlimitedDailyVisualCalls ? ' 次 · 每日次数不限' : ' / ' + rsrc.maxDailyVisualCalls + ' 次');
       resourceStatus.textContent =
-        '今日看图 ' +
-        rsrc.todayCalls +
-        '/' +
-        rsrc.maxDailyVisualCalls +
-        ' 次 · 图片缓存 ' +
+        '图片缓存 ' +
         mb(rsrc.cacheBytes) +
         ' · 累计图片交付 ' +
         mb(rsrc.publishedBytes) +
@@ -2165,18 +2596,28 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
     if (!settingsMode)
       renderTimeline({
         ...state,
-        outbox: [
-          ...state.outbox,
-          ...archivedRecords.filter((r) => !state.outbox.some((x) => x.id === r.id)),
-        ],
+        outbox: archivedRecords.length
+          ? [...new Map([...archivedRecords, ...state.outbox].map(r => [r.id, r])).values()]
+              .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
+          : state.outbox,
       });
   }
+  type Records = Pick<Snapshot, 'inbox' | 'outbox' | 'videos' | 'comments'>;
+  let records: Records = { inbox: [], outbox: [] };
+  let recordsRevision: string | undefined;
   async function refresh() {
     if (refreshing || ctx.signal.aborted) return;
     refreshing = true;
     try {
-      const s = await ctx.invoke<Snapshot>('status');
-      if (!ctx.signal.aborted) render(s);
+      const s = await ctx.invoke<Omit<Snapshot, keyof Records> & Partial<Records>>(
+        'status', ['compact', recordsRevision ?? null],
+      );
+      if (ctx.signal.aborted) return;
+      if (s.inbox && s.outbox) {
+        records = { inbox: s.inbox, outbox: s.outbox, videos: s.videos, comments: s.comments };
+        recordsRevision = s.recordsRevision;
+      }
+      render({ ...s, ...records });
     } finally {
       refreshing = false;
     }

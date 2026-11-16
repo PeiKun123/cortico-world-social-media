@@ -119,6 +119,7 @@ export interface Account {
 }
 export interface Video {
   kind?: 'video' | 'images';
+  imageCount?: number;
   ownerId?: string;
   publishedAt?: number;
   id: string;

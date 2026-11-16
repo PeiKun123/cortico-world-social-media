@@ -1,4 +1,7 @@
-import { writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { tsImport } from 'tsx/esm/api';
 import { build } from 'esbuild';
 await build({
@@ -6,14 +9,28 @@ await build({
   bundle: true,
   format: 'esm',
   target: 'es2022',
-  outfile: 'dist/webui.js',
+  outfile: 'dist/webui-surf-0612-release.js',
   minify: true,
   legalComments: 'none',
 });
 
-// Keep the catalog tool declaration aligned with the installed runtime tools.
+await build({
+  entryPoints: ['src/webui/style.css'],
+  bundle: true,
+  minify: true,
+  outfile: 'dist/webui-surf-0612-release.css',
+  legalComments: 'none',
+});
+
+// Use the same dry export as Cortico so the catalog includes the environment prompt.
 const { SOCIALMEDIA } = await tsImport('../src/definition.ts', import.meta.url);
-await writeFile(
-  new URL('../describe.json', import.meta.url),
-  JSON.stringify(SOCIALMEDIA.describe, null, 2) + '\n',
-);
+const { exportDescribe } = await tsImport('cortico/extensions/describe-export.ts', import.meta.url);
+const scratchDir = await mkdtemp(join(tmpdir(), 'socialmedia-describe-'));
+try {
+  const packageDir = fileURLToPath(new URL('..', import.meta.url));
+  const describe = await exportDescribe('world', SOCIALMEDIA, { packageDir, scratchDir });
+  if (!describe) throw Error('SocialMediaWorld has no catalog description.');
+  await writeFile(new URL('../describe.json', import.meta.url), JSON.stringify(describe, null, 2) + '\n');
+} finally {
+  await rm(scratchDir, { recursive: true, force: true });
+}

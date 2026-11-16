@@ -1,6 +1,9 @@
 import { GROUP_DEFAULTS, type GroupConfig } from './group-policy.ts';
-import { RESOURCE_DEFAULTS, type ResourceConfig } from './resource-policy.ts';
+import { MAX_VIDEO_FRAMES, RESOURCE_DEFAULTS, type ResourceConfig } from './resource-policy.ts';
 import type { ConfigGroup } from 'cortico/core/types.ts';
+// Release switch for the public-post adapters. Keep existing deployment settings and records for future trials.
+export const PUBLIC_POST_TRIAL_ENABLED = false;
+
 export interface SocialPlatformConfig {
   chat?: GroupConfig;
   dynamics?: {
@@ -120,6 +123,7 @@ export interface SocialMediaConfigSection {
   focus: FocusConfig;
   enabled: boolean;
   roaming: RoamingConfig;
+  experiments?: { corpus?: boolean; practice?: boolean; training?: boolean; tieba?: boolean; xiaohongshu?: boolean };
   platforms: Record<string, SocialPlatformConfig>;
   media: { ffmpegFile: string; maxFrames: number } & Partial<ResourceConfig>;
   browser: { executableFile: string; background: boolean };
@@ -128,6 +132,7 @@ export interface SocialMediaConfigSection {
     background: boolean;
     releaseAfterTask?: boolean;
     compatibilityWindow?: boolean;
+    hideCompatibilityWindow?: boolean;
     pageWaitSeconds?: number;
   };
   kuaishouBrowser?: { executableFile: string; background: boolean };
@@ -154,6 +159,7 @@ export const SOCIALMEDIA_DEFAULTS: SocialMediaConfigSection = {
     autoReplyIntervalMinutes: 2,
   },
   roaming: { enabled: false, ...ROAMING_PRESETS.active },
+  experiments: { corpus: false, practice: false, training: false, tieba: false, xiaohongshu: false },
   platforms: {
     kuaishou: {
       enabled: false,
@@ -230,6 +236,7 @@ export const SOCIALMEDIA_DEFAULTS: SocialMediaConfigSection = {
     background: true,
     releaseAfterTask: true,
     compatibilityWindow: false,
+    hideCompatibilityWindow: false,
     pageWaitSeconds: 45,
   },
   kuaishouBrowser: { executableFile: '', background: true },
@@ -239,8 +246,15 @@ export const SOCIALMEDIA_CONFIG_GROUP: ConfigGroup = {
   owner: 'world:socialmedia',
   schema: {
     type: 'object',
-    title: '社交视窗',
+    title: '小鲸鱼爱冲浪',
     properties: {
+      'worlds.socialmedia.experiments.corpus': { type: 'boolean', title: '语料学习' },
+      'worlds.socialmedia.experiments.practice': { type: 'boolean', title: '人格化练习', description: '实验性 Gemini 网页陪练。开启持续训练后消耗较高。' },
+      'worlds.socialmedia.experiments.training': { type: 'boolean', title: '开始训练', description: '高消耗。空闲时持续发问、追问与复盘，消耗小K的模型用量及 Gemini 网页额度。建议短时开启。' },
+      ...(PUBLIC_POST_TRIAL_ENABLED ? {
+        'worlds.socialmedia.experiments.tieba': { type: 'boolean', title: '百度贴吧公开帖' },
+        'worlds.socialmedia.experiments.xiaohongshu': { type: 'boolean', title: '小红书公开帖' },
+      } : {}),
       ...Object.fromEntries(
         Object.entries({
           enabled: { type: 'boolean', title: '启用快手（实验）' },
@@ -290,12 +304,14 @@ export const SOCIALMEDIA_CONFIG_GROUP: ConfigGroup = {
           'focus.autoReplyIntervalMinutes': {
             type: 'integer',
             title: '快手新评论检查间隔（分钟）',
+            description: '开启自动回应后，在设定间隔检查已监测作品的新评论。',
             minimum: 2,
             maximum: 60,
           },
           'focus.intervalMinutes': {
             type: 'integer',
             title: '快手关注检查间隔（分钟）',
+            description: '隔多久去看一次特别关注的近期作品。',
             minimum: 10,
             maximum: 1440,
           },
@@ -356,6 +372,7 @@ export const SOCIALMEDIA_CONFIG_GROUP: ConfigGroup = {
           intervalMinutes: {
             type: 'integer',
             title: '抖音关注检查间隔（分钟）',
+            description: '隔多久去看一次特别关注的近期作品。',
             minimum: 10,
             maximum: 1440,
           },
@@ -530,7 +547,7 @@ export const SOCIALMEDIA_CONFIG_GROUP: ConfigGroup = {
         type: 'integer',
         title: '网页加载等待上限（秒）',
         description:
-          '默认45秒，可设15–120秒。用于作品、评论区与指定楼层的加载等待，慢网络可调大；成功就提前继续，不固定停留。到期保留准确失败阶段；发送结果不明不会自动补发，任务结束仍释放浏览器。',
+          '作品、评论区和指定楼层各阶段的等待上限。页面加载成功就继续；网络慢可以选更长的等待。',
         minimum: 15,
         maximum: 120,
         'x-hot': true,
@@ -538,15 +555,21 @@ export const SOCIALMEDIA_CONFIG_GROUP: ConfigGroup = {
       'worlds.socialmedia.douyinBrowser.releaseAfterTask': {
         type: 'boolean',
         title: '抖音任务结束立即释放浏览器',
-        description:
-          '默认开启，读取或回复结束即退出后台进程，保留登录；群聊按原间隔重新启动检查。关闭后可减少冷启动等待，但会多占内存。',
+        description: '读取或回复结束后收回浏览器内存，保留登录。关闭可减少下次启动等待，浏览器会多驻留一段时间。',
         'x-hot': true,
       },
       'worlds.socialmedia.douyinBrowser.compatibilityWindow': {
         type: 'boolean',
         title: '兼容窗口模式（Windows）',
         description:
-          '默认关闭。无窗口模式无法正常加载时可主动开启，并保留后台运行开关。使用普通Edge渲染，独立窗口放到屏幕外而非当前工作区；会出现独立Edge任务栏图标，它不是完全隐藏，资源占用仍是完整浏览器。不会自动切换、代做验证或改变登录资料。非Windows不支持。',
+          '默认关闭。无窗口模式无法正常加载时可主动开启，并保留后台运行开关。使用普通Edge渲染，独立窗口放到屏幕外而非当前工作区；单独使用时可能出现Edge任务栏图标，可另开“隐藏兼容窗口（试验）”减少干扰。资源占用仍是完整浏览器。不会自动切换、代做验证或改变登录资料。非Windows不支持。',
+        'x-hot': true,
+      },
+      'worlds.socialmedia.douyinBrowser.hideCompatibilityWindow': {
+        type: 'boolean',
+        title: '隐藏兼容窗口（试验）',
+        description:
+          '仅Windows兼容模式生效。隐藏本World的浏览器窗口与任务栏入口，保持普通浏览器渲染；辅助程序按需运行后退出，不额外常驻。启动瞬间仍可能短暂闪现图标。登录/验证窗口仍可见；失败回退原兼容方式，可关闭此项。',
         'x-hot': true,
       },
       'worlds.socialmedia.douyinBrowser.background': {
@@ -571,6 +594,7 @@ export const SOCIALMEDIA_CONFIG_GROUP: ConfigGroup = {
       'worlds.socialmedia.platforms.bilibili.monitor.intervalSec': {
         type: 'integer',
         title: '通知检查间隔（秒）',
+        description: '控制多久查看一次新回复和 @。频率越高，后台请求越多。',
         minimum: 30,
         maximum: 3600,
         'x-hot': true,
@@ -734,15 +758,22 @@ export const SOCIALMEDIA_CONFIG_GROUP: ConfigGroup = {
       },
       'worlds.socialmedia.media.maxDailyVisualCalls': {
         type: 'integer',
-        title: '每日最多视觉观察次数',
+        title: '每天最多看几次',
         minimum: 0,
         maximum: 200,
-        description: '包括缓存图片的再次查看；失败尝试也计数，防止反复重试。',
+        description: '三平台共用。一次抽帧或翻一批图算一次，重复看缓存和取图失败也计数。设为 0 关闭画面。',
+        'x-hot': true,
+      },
+      'worlds.socialmedia.media.unlimitedDailyVisualCalls': {
+        type: 'boolean',
+        title: '取消每日次数上限',
+        description: '高消耗选项。开启后每天可取图更多，图片输入和本机取图开销可能增加。单次张数、单张体积与累计交付限制仍生效。次数设为 0 仍会关闭画面。',
         'x-hot': true,
       },
       'worlds.socialmedia.media.maxImageKB': {
         type: 'integer',
         title: '单张图片大小上限（KB）',
+        description: '影响送给模型的单张图片体积。压缩太多时，分镜里的小字更难读。',
         minimum: 64,
         maximum: 2048,
         'x-hot': true,
@@ -759,6 +790,7 @@ export const SOCIALMEDIA_CONFIG_GROUP: ConfigGroup = {
       'worlds.socialmedia.media.cacheDays': {
         type: 'integer',
         title: '图片缓存保留天数',
+        description: '期间回看同一画面可以复用本地图片，减少重复下载和抽帧。',
         minimum: 1,
         maximum: 30,
         'x-hot': true,
@@ -766,6 +798,7 @@ export const SOCIALMEDIA_CONFIG_GROUP: ConfigGroup = {
       'worlds.socialmedia.media.maxCacheMB': {
         type: 'integer',
         title: '图片缓存容量上限（MB）',
+        description: '空间用完会淘汰旧缓存。常回看的作品多，可以留更大空间。',
         minimum: 1,
         maximum: 1024,
         'x-hot': true,
@@ -781,6 +814,7 @@ export const SOCIALMEDIA_CONFIG_GROUP: ConfigGroup = {
       'worlds.socialmedia.media.historyDays': {
         type: 'integer',
         title: '近期详细发言保留天数',
+        description: '决定详细发言在近期区停留多久。更早的记录会移到归档。',
         minimum: 2,
         maximum: 365,
         'x-hot': true,
@@ -804,12 +838,21 @@ export const SOCIALMEDIA_CONFIG_GROUP: ConfigGroup = {
       'worlds.socialmedia.media.ffmpegFile': {
         type: 'string',
         title: 'FFmpeg 程序',
-        description: '填可执行文件路径或 PATH 中的 ffmpeg；留空禁用画面采样。',
+        description: 'B站视频抽帧需要 FFmpeg，可填可执行文件路径或 PATH 中的 ffmpeg。留空时抖音仍可通过网页取图或抽帧，多帧返回为独立图片。',
+        'x-hot': true,
+      },
+      'worlds.socialmedia.media.maxVideoFrames': {
+        type: 'integer',
+        title: '每次最多抽几帧视频',
+        description: '按观察时段自动决定帧数，短片少取，较长视频多取。最多 9 帧可拼成一张，更多会分成两张。',
+        minimum: 1,
+        maximum: MAX_VIDEO_FRAMES,
         'x-hot': true,
       },
       'worlds.socialmedia.media.maxFrames': {
         type: 'integer',
-        title: '单次最多采样画面',
+        title: '每批最多看几张图文',
+        description: '一次送给模型的图文张数。多图长帖可以继续翻下一批。',
         minimum: 1,
         maximum: 6,
         'x-hot': true,
@@ -857,7 +900,7 @@ for (const [key, prop] of Object.entries({
     type: 'string',
     title: '群聊活跃度',
     enum: ['quiet', 'balanced', 'active'] as string[],
-    description: '活跃档更愿意接普通话题和提问，不要求@；仍会判断是否适合接话，不强行刷屏。',
+    description: '安静优先接直接提及，均衡也会挑合适的普通话题，活跃更容易接到提问或闲聊。',
   },
   proactiveEnabled: {
     type: 'boolean',
@@ -867,6 +910,7 @@ for (const [key, prop] of Object.entries({
   proactiveIntervalMinutes: {
     type: 'integer',
     title: '主动群话题最小间隔（分钟）',
+    description: '控制同一个群连续收到主动开话题机会的频率。',
     minimum: 30,
     maximum: 1440,
   },
@@ -874,6 +918,7 @@ for (const [key, prop] of Object.entries({
   proactiveIdleMinutes: {
     type: 'integer',
     title: '主动群话题前安静空闲（分钟）',
+    description: '群里安静了多久，才考虑主动开一个话题。',
     minimum: 5,
     maximum: 180,
   },
@@ -888,9 +933,9 @@ for (const [key, prop] of Object.entries({
     description:
       '例如 123456789|我的群；多个群以分号分隔，最多十个。首次保存后点检查，固定真实会话。',
   },
-  intervalSec: { type: 'integer', title: '群消息检查间隔（秒）', minimum: 30, maximum: 600 },
-  minIntervalSec: { type: 'integer', title: '群发言最小间隔（秒）', minimum: 10, maximum: 600 },
-  maxDailyMessages: { type: 'integer', title: '每日群发言上限', minimum: 1, maximum: 500 },
+  intervalSec: { type: 'integer', title: '群消息检查间隔（秒）', description: '越短越早看到新消息，后台网页读取也更频繁。', minimum: 30, maximum: 600 },
+  minIntervalSec: { type: 'integer', title: '群发言最小间隔（秒）', description: '拉长两次群发言之间的间隔。', minimum: 10, maximum: 600 },
+  maxDailyMessages: { type: 'integer', title: '每日群发言上限', description: '约束 Bot 一天最多在群里发多少条。', minimum: 1, maximum: 500 },
 } as const))
   SOCIALMEDIA_CONFIG_GROUP.schema.properties['worlds.socialmedia.platforms.douyin.chat.' + key] = {
     ...prop,

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   douyinVideoId,
+  douyinImageUrls,
   douyinTarget,
   mapDouyinComment,
   mapDouyinVideo,
@@ -96,4 +97,15 @@ describe('Douyin isolated browser adapter', () => {
 it('uses the same stable public person identifier in page and API modes', () => {
   const user = { uid: '123', nickname: '访客', sec_uid: 'MS4wLjABAAAAtest_account_identity' };
   expect(mapDouyinComment({ cid: '88', text: '好可爱', user }, id).authorId).toBe(user.sec_uid);
+});
+
+
+it('retains gallery order, identifies note URLs and never accepts an arbitrary CDN destination', () => {
+  const image = (url: string) => ({url_list: [url]});
+  const first = 'https://p3-sign.douyinpic.com/a.jpg';
+  const second = 'https://p9-sign.douyinpic.com/b.jpg';
+  const raw = {aweme_id: id, images: [image(first),image('https://douyinpic.com.evil.test/private'),image(second)], video: {duration: 11000}};
+  expect(douyinVideoId('https://www.douyin.com/note/' + id)).toBe(id);
+  expect(mapDouyinVideo(raw)).toMatchObject({kind:'images',imageCount:3,durationSec:0});
+  expect(douyinImageUrls(raw)).toEqual([first, null, second]);
 });

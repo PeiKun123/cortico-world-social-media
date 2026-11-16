@@ -1,6 +1,11 @@
+export const MAX_VIDEO_FRAMES = 12;
+export const MAX_GALLERY_IMAGES = 6;
+export const MAX_STORYBOARD_CELLS = 9;
 export const RESOURCE_DEFAULTS = {
+  maxVideoFrames: 9,
   textFirst: true,
   maxDailyVisualCalls: 20,
+  unlimitedDailyVisualCalls: false,
   maxImageKB: 512,
   maxPublishedMediaMB: 512,
   cacheDays: 7,

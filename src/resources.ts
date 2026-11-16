@@ -12,7 +12,7 @@ import {
   realpathSync,
 } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { RESOURCE_DEFAULTS, type ResourceConfig } from './resource-policy.ts';
+import { MAX_VIDEO_FRAMES, RESOURCE_DEFAULTS, type ResourceConfig } from './resource-policy.ts';
 export { RESOURCE_DEFAULTS, type ResourceConfig } from './resource-policy.ts';
 export type SampleFrame = { atSec: number; bytes: Uint8Array };
 type Ledger = {
@@ -177,6 +177,7 @@ export class MediaResources {
     return {
       todayCalls: this.ledger.todayCalls,
       maxDailyVisualCalls: this.cfg().maxDailyVisualCalls,
+      unlimitedDailyVisualCalls: this.cfg().unlimitedDailyVisualCalls,
       publishedBytes: this.ledger.publishedBytes,
       maxPublishedBytes: this.cfg().maxPublishedMediaMB * 1048576,
       cacheBytes: entries.reduce((n, e) => n + e.bytes, 0),
@@ -224,13 +225,15 @@ export class MediaResources {
         rmSync(dir, { recursive: true });
     }
   }
-  async observe(key: string, capture: () => Promise<SampleFrame[]>) {
+  async observe(key: string, capture: () => Promise<SampleFrame[]>, cacheIf = (_frames: SampleFrame[]) => true) {
     return this.serial(async () => {
       this.sweep();
       this.resetDay();
       const cfg = this.cfg();
-      if (this.ledger.todayCalls >= cfg.maxDailyVisualCalls)
-        throw Error('今日视觉观察次数已用完；可继续读文字和评论。');
+      if (cfg.maxDailyVisualCalls === 0)
+        throw Error('画面观察已关闭；可继续读文字和评论。');
+      if (!cfg.unlimitedDailyVisualCalls && this.ledger.todayCalls >= cfg.maxDailyVisualCalls)
+        throw Error('今日画面观察次数已用完；可继续读文字和评论。');
       const path = join(
         this.dir,
         'frame-' + createHash('sha256').update(key).digest('hex') + '.json',
@@ -245,7 +248,7 @@ export class MediaResources {
             c.kind === 'socialmedia-frames-v1' &&
             Date.now() - c.capturedAt <= cfg.cacheDays * 86400000 &&
             Array.isArray(c.frames) &&
-            c.frames.length <= 6
+            c.frames.length <= MAX_VIDEO_FRAMES
           ) {
             const frames = c.frames.map((f) => ({
               atSec: f.atSec,
@@ -272,7 +275,7 @@ export class MediaResources {
             data: Buffer.from(f.bytes).toString('base64'),
           })),
         };
-      this.atomic(path, JSON.stringify(entry));
+      if (cacheIf(frames)) this.atomic(path, JSON.stringify(entry));
       this.ledger.publishedBytes += bytes;
       this.save();
       this.sweep();
@@ -284,7 +287,7 @@ export class MediaResources {
     if (
       !Array.isArray(frames) ||
       !frames.length ||
-      frames.length > 6 ||
+      frames.length > MAX_VIDEO_FRAMES ||
       frames.some(
         (f) =>
           !Number.isFinite(f.atSec) ||

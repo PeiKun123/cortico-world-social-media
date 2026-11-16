@@ -4,6 +4,13 @@ import { SOCIALMEDIA_DEFAULTS } from '../src/config.ts';
 import { describe, expect, it } from 'vitest';
 import { connectionEvidence, mount, mountSettings } from '../src/webui/client.ts';
 import type { WebUiPanelContext } from 'cortico/web/shared/client-panel.ts';
+async function expandWorks(root: HTMLElement) {
+  for (const d of root.querySelectorAll<HTMLDetailsElement>('.sm-video')) {
+    d.open = true;
+    d.dispatchEvent(new Event('toggle'));
+  }
+  await new Promise((r) => setTimeout(r, 0));
+}
 describe('operator desk', () => {
   it('renders untrusted text literally, preserves scroll, and never sends cookies into a model', async () => {
     const root = document.createElement('div');
@@ -40,11 +47,12 @@ describe('operator desk', () => {
     } as unknown as WebUiPanelContext;
     mount(ctx);
     await new Promise((r) => setTimeout(r, 0));
+    expect(root.querySelector<HTMLDetailsElement>('.sm-video')?.open).toBe(false);
+    await expandWorks(root);
     expect(root.querySelector('script')).toBeNull();
     expect(root.querySelector('a')).toBeNull();
     expect(root.textContent).toContain('<script>bad()</script>');
     expect(root.querySelectorAll('input[type=checkbox]')).toHaveLength(0);
-    expect(root.querySelector<HTMLDetailsElement>('.sm-video')?.open).toBe(false);
     const list = root.querySelector('.sm-list') as HTMLElement;
     list.scrollTop = 123;
     intervals[1]();
@@ -93,6 +101,7 @@ it('keeps self-only receipts without routine recheck controls', async () => {
     },
   } as unknown as WebUiPanelContext);
   await new Promise((r) => setTimeout(r, 0));
+  await expandWorks(root);
   expect(root.textContent).toContain('仅自己可见');
   expect(root.querySelector('time')?.textContent).toBe(
     new Date(state.outbox[0].createdAt).toLocaleString(),
@@ -204,6 +213,7 @@ it('collapses long historical comments and keeps expanded bodies open on refresh
   } as unknown as WebUiPanelContext);
   try {
     await new Promise((r) => setTimeout(r, 0));
+    await expandWorks(root);
     const body = root.querySelector<HTMLDetailsElement>('.sm-long-message');
     expect(body).not.toBeNull();
     expect(body!.open).toBe(false);
@@ -687,7 +697,7 @@ it('shows resource usage and invokes only the World-owned cache cleanup control'
     },
   } as unknown as WebUiPanelContext);
   await new Promise((r) => setTimeout(r, 0));
-  expect(root.textContent).toContain('今日看图 2/20');
+  expect(root.textContent).toContain('今天已看 2 / 20 次');
   [...root.querySelectorAll('button')].find((b) => b.textContent === '清理图片缓存')!.click();
   await new Promise((r) => setTimeout(r, 0));
   expect(calls).toContain('clearMediaCache');
@@ -850,6 +860,7 @@ it('gives all three record groups and outgoing replies a platform identity for c
   } as unknown as WebUiPanelContext);
   try {
     await new Promise((r) => setTimeout(r, 0));
+    await expandWorks(root);
     for (const id of ['bilibili', 'douyin', 'kuaishou']) {
       const group = root.querySelector('.sm-video[data-platform="' + id + '"]');
       expect(group).not.toBeNull();
@@ -1440,6 +1451,68 @@ it('does not show an empty browser-failure panel before any failure', async () =
   try {
     await new Promise((r) => setTimeout(r, 0));
     expect(root.querySelector<HTMLElement>('.sm-browser-failure')?.hidden).toBe(true);
+  } finally {
+    c.abort();
+    root.remove();
+  }
+});
+
+it('puts a direct verification action beside a logged-in Douyin account and checks the background explicitly', async () => {
+  const root = document.createElement('div');
+  document.body.append(root);
+  const c = new AbortController(),
+    calls: string[] = [];
+  const state = {
+    config: structuredClone(SOCIALMEDIA_DEFAULTS),
+    platforms: [
+      { id: 'douyin', enabled: true, posting: true, account: { id: '42', name: '测试' } },
+    ],
+    inbox: [],
+    outbox: [],
+    pending: 0,
+    unknown: 0,
+    douyin: {
+      running: false,
+      loginOpen: false,
+      detail: '等待处理',
+      verification: {
+        paused: true,
+        at: '2026-11-04T00:00:00Z',
+        pageTitle: '安全验证',
+        browserMode: 'windowless',
+      },
+    },
+  };
+  mountSettings({
+    root,
+    signal: c.signal,
+    interval: () => ({ dispose() {} }),
+    invoke: async (method: string) => {
+      calls.push(method);
+      return method === 'status'
+        ? structuredClone(state)
+        : { detail: '后台尚未恢复', backgroundReady: false };
+    },
+  } as unknown as WebUiPanelContext);
+  try {
+    await new Promise((r) => setTimeout(r, 0));
+    const panel = root.querySelector<HTMLElement>('.sm-platform-card[data-platform=douyin]')!;
+    const notice = panel.querySelector<HTMLElement>('.sm-verification')!;
+    expect(notice.hidden).toBe(false);
+    expect(notice.textContent).toContain('已登录');
+    const open = [...panel.querySelectorAll('button')].find(
+      (b) => b.textContent === '处理人工验证',
+    )!;
+    expect(open).toBeDefined();
+    open.click();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(calls).toContain('douyinLogin');
+    [...panel.querySelectorAll('button')]
+      .find((b) => b.textContent === '完成登录并检查后台')!
+      .click();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(calls).toContain('douyinFinishLogin');
+    expect(panel.textContent).toContain('后台尚未恢复');
   } finally {
     c.abort();
     root.remove();

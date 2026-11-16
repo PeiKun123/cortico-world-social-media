@@ -1,25 +1,107 @@
-import { mkdtemp, readFile, rm, open } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, open, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { safeAssetUrl } from './platforms/bilibili.ts';
+import { MAX_STORYBOARD_CELLS, MAX_VIDEO_FRAMES } from './resource-policy.ts';
 
-export function sampleTimes(durationSec: number, maxFrames: number, requested?: unknown): number[] {
+export function sampleTimes(
+  durationSec: number,
+  maxFrames: number,
+  requested?: unknown,
+  range: { fromSec?: unknown; toSec?: unknown; automatic?: boolean } = {},
+): number[] {
   if (!Number.isFinite(durationSec) || durationSec <= 0) throw new Error('视频时长无效');
-  const max = Math.max(1, Math.min(6, Math.trunc(maxFrames)));
-  const values =
-    requested === undefined
-      ? Array.from({ length: max }, (_, i) => (durationSec * (i + 1)) / (max + 1))
-      : requested;
-  if (
-    !Array.isArray(values) ||
-    !values.length ||
-    values.length > max ||
-    values.some((v) => typeof v !== 'number' || !Number.isFinite(v) || v < 0 || v >= durationSec)
-  )
+  const max = Math.max(1, Math.min(MAX_VIDEO_FRAMES, Math.trunc(maxFrames)));
+  const from = range.fromSec ?? 0, to = range.toSec ?? durationSec;
+  if (typeof from !== 'number' || typeof to !== 'number' || !Number.isFinite(from) ||
+      !Number.isFinite(to) || from < 0 || to > durationSec || to <= from)
+    throw new Error('观察范围应在视频时长内，且结束晚于开始。');
+  if (requested !== undefined && (range.fromSec !== undefined || range.toSec !== undefined))
+    throw new Error('指定采样时刻与指定观察范围，请选择一种。');
+  const span = to - from;
+  const recommended = span <= 15 && max <= 2 ? 1
+    : span <= 30 ? 3
+    : span <= 90 ? 4
+    : span <= 180 ? 6
+    : span >= 240 && max === MAX_VIDEO_FRAMES ? MAX_VIDEO_FRAMES
+    : 9;
+  const count = range.automatic ? Math.min(max, recommended) : max;
+  const values = requested === undefined
+    ? Array.from({ length: count }, (_, i) => from + ((to - from) * (i + 1)) / (count + 1))
+    : requested;
+  if (!Array.isArray(values) || !values.length || values.length > max ||
+      values.some((v) => typeof v !== 'number' || !Number.isFinite(v) || v < from || v >= to))
     throw new Error(`请提供最多 ${max} 个视频范围内的采样时刻（秒）。`);
-  return [...new Set(values.map((n) => Math.round(n * 100) / 100))];
+  return [...new Set(values.map((v) => {
+    const rounded = Math.round(v * 100) / 100;
+    return rounded >= from && rounded < to ? rounded : v;
+  }))].sort((a, b) => a - b);
 }
+
+/** Bound the result before serializing; never cut JSON or silently split a subtitle segment. */
+export function serializeObservation(payload: Record<string, unknown>, offset = 0, textBudget = Infinity) {
+  if (!Number.isSafeInteger(offset) || offset < 0 || offset > 1000) throw new Error('字幕游标无效。');
+  const maxChars = 24000;
+  const data = payload.subtitles as {
+    segments?: Array<{ from: number; to: number; text: string }>;
+    truncated?: boolean;
+  } | undefined;
+  if (!Array.isArray(data?.segments)) {
+    const serialized = JSON.stringify(payload);
+    if (serialized.length > maxChars) throw new Error('观察结果超过文字预算。');
+    return serialized;
+  }
+  const all = data.segments, segments: typeof all = [];
+  if (offset > all.length) throw new Error('字幕游标超出当前字幕范围。');
+  const page = { ...data, segments, offset, nextOffset: null as number | null, truncated: false, sourceTruncated: !!data.truncated };
+  const result = { ...payload, subtitles: page };
+  let chars = JSON.stringify(result).length + 24, remaining = textBudget;
+  for (let i = offset; i < all.length; i++) {
+    const entry = all[i], size = JSON.stringify(entry).length + 1;
+    if (chars + size > maxChars || entry.text.length > remaining) break;
+    segments.push(entry);
+    chars += size;
+    remaining -= entry.text.length;
+  }
+  const end = offset + segments.length;
+  page.truncated = end < all.length || !!data.truncated;
+  page.nextOffset = segments.length && end < all.length ? end : null;
+  const serialized = JSON.stringify(result);
+  if (serialized.length > maxChars) throw new Error('观察结果超过文字预算。');
+  return serialized;
+}
+
+export async function composeStoryboard(
+  frames: Array<{ atSec: number; bytes: Uint8Array }>, ffmpegFile: string, dir: string,
+  signal?: AbortSignal,
+) {
+  if (frames.length < 2 || frames.length > MAX_STORYBOARD_CELLS)
+    throw new Error('每张分镜支持 2 到 ' + MAX_STORYBOARD_CELLS + ' 帧。');
+  const cols = frames.length > 6 ? 3 : 2, rows = Math.ceil(frames.length / cols);
+  const width = cols === 3 ? 266 : 480;
+  const height = Math.min(320, Math.floor(640000 / (cols * rows * width) / 2) * 2);
+  const args = ['-nostdin', '-hide_banner', '-loglevel', 'error', '-filter_complex_threads', '1'];
+  const cells = frames.map((frame, i) => ({
+    atSec: frame.atSec, row: Math.floor(i / cols) + 1, column: i % cols + 1,
+  }));
+  for (let i = 0; i < frames.length; i++) {
+    signal?.throwIfAborted();
+    const input = join(dir, `cell-${i}.jpg`);
+    await writeFile(input, frames[i].bytes, { flag: 'wx', mode: 0o600 });
+    args.push('-protocol_whitelist', 'file,pipe', '-i', input);
+  }
+  const filters = cells.map((_, i) =>
+    `[${i}:v]scale=${width - 4}:${height - 4}:force_original_aspect_ratio=decrease:force_divisible_by=2,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=0x17212e,setsar=1[v${i}]`);
+  const layout = cells.map((c) => `${(c.column - 1) * width}_${(c.row - 1) * height}`).join('|');
+  filters.push(cells.map((_, i) => `[v${i}]`).join('') +
+    `xstack=inputs=${cells.length}:layout=${layout}:fill=0x17212e[out]`);
+  const output = join(dir, 'storyboard.jpg');
+  await runFfmpeg(ffmpegFile, [...args, '-filter_complex', filters.join(';'), '-map', '[out]',
+    '-frames:v', '1', '-threads', '1', '-q:v', '5', output], signal);
+  return { cells, bytes: await readFile(output) };
+}
+
 export function runFfmpeg(file: string, args: string[], signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (!file.trim()) {
@@ -75,6 +157,10 @@ export async function sampleVideo(
       await response.body?.cancel();
       throw new Error('视频流超过 64MB，请通过浏览器观看。');
     }
+    if (/^(?:text\/|application\/(?:json|xhtml\+xml))/i.test(response.headers.get('content-type') || '')) {
+      await response.body?.cancel();
+      throw new Error('平台返回了文字页面而非视频流，未交给 FFmpeg 解码。');
+    }
     const reader = response.body?.getReader();
     if (!reader) throw new Error('视频流为空');
     const input = join(dir, 'video.media');
@@ -111,7 +197,7 @@ export async function sampleVideo(
           '-frames:v',
           '1',
           '-vf',
-          'scale=960:-2',
+          'scale=960:960:force_original_aspect_ratio=decrease:force_divisible_by=2',
           '-threads',
           '2',
           '-q:v',
