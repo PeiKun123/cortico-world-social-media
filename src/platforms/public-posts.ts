@@ -1,4 +1,5 @@
 import { join } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { chromium, type BrowserContext, type Page, type Request } from 'playwright-core';
 import { findBrowserExecutable } from './bilibili-browser.ts';
 
@@ -10,7 +11,9 @@ interface PublicPageOptions {
   media?: boolean;
   checkConnection?: boolean;
   reuseLogin?: boolean;
+  showWorkWindow?: boolean;
   allowWrite?: (request: Request) => boolean;
+  readNote?: () => { id: string; ownerId: string } | undefined;
 }
 const PUBLIC_POST_LOGIN_URLS = {
   tieba: 'https://tieba.baidu.com/',
@@ -43,18 +46,20 @@ export function publicPostUrl(platform: PublicPostPlatform, input: string) {
 export class PublicPostBrowser {
   private readonly reading = new Set<PublicPostPlatform>();
   private readonly blocked = new Map<PublicPostPlatform, PlatformError>();
+  private restrictedNote?: { id: string; ownerId: string };
+  recoveryNote(platform: PublicPostPlatform) { return platform === 'xiaohongshu' && this.restrictedNote ? { ...this.restrictedNote } : undefined; }
   private readonly loginWindows = new Map<PublicPostPlatform, BrowserContext>();
   constructor(private readonly profileRoot: string) {}
 
   loginOpen(platform: PublicPostPlatform) { return this.loginWindows.has(platform); }
   paused(platform: PublicPostPlatform) { return this.blocked.get(platform)?.message; }
 
-  private async launch(platform: PublicPostPlatform, headless: boolean) {
+  private async launch(platform: PublicPostPlatform, headless: boolean, manualLogin = false) {
     const executablePath = publicBrowserExecutable();
     if (!executablePath) throw Error('未找到 Microsoft Edge 或 Chrome。');
     return chromium.launchPersistentContext(join(this.profileRoot, platform), {
       executablePath, headless, chromiumSandbox: true, timeout: 15000,
-      ...(headless ? { serviceWorkers: 'block' as const } : {}),
+      ...(!manualLogin ? { serviceWorkers: 'block' as const } : {}),
       locale: 'zh-CN', args: ['--disable-notifications', '--disable-background-mode'],
     }).catch(() => {
       throw Error(PUBLIC_POST_NAMES[platform] + '专用 Edge 启动失败，请检查是否还有旧版的专用窗口打开。');
@@ -71,14 +76,15 @@ export class PublicPostBrowser {
     this.reading.add(platform);
     let context: BrowserContext | undefined;
     try {
-      context = await this.launch(platform, false);
+      context = await this.launch(platform, false, true);
       signal?.throwIfAborted();
       this.loginWindows.set(platform, context);
       context.once('close', () => {
         if (this.loginWindows.get(platform) === context) this.loginWindows.delete(platform);
       });
       const page = context.pages()[0] ?? await context.newPage();
-      await page.goto(PUBLIC_POST_LOGIN_URLS[platform], { waitUntil: 'domcontentloaded', timeout: 16000 });
+      const note = this.recoveryNote(platform);
+      await page.goto(note ? profileUrl(platform, note.ownerId).href : PUBLIC_POST_LOGIN_URLS[platform], { waitUntil: 'domcontentloaded', timeout: 16000 });
       await page.bringToFront();
     } catch (error) {
       if (signal?.aborted) await context?.close().catch(() => {});
@@ -97,19 +103,29 @@ export class PublicPostBrowser {
 
   async withPublicPage<T>(platform: PublicPostPlatform, signal: AbortSignal, run: (page: Page) => Promise<T>, options: PublicPageOptions = {}) {
     signal.throwIfAborted();
+    // A background read may briefly own the same profile. Wait only before a new
+    // operation opens its browser, then recheck the login and restriction state.
+    if (platform === 'xiaohongshu' && options.allowWrite && this.reading.has(platform)) {
+      const until = Date.now() + 8000;
+      while (this.reading.has(platform) && !this.blocked.has(platform) &&
+             !this.loginWindows.has(platform) && Date.now() < until) {
+        await delay(200, undefined, { signal });
+      }
+      signal.throwIfAborted();
+    }
     const login = this.loginWindows.get(platform);
     if (login && !options.reuseLogin)
       throw Error(PUBLIC_POST_NAMES[platform] + '专用窗口等待核对账号，请先完成绑定或关闭专用窗口。');
-    if (this.reading.has(platform)) throw Error(PUBLIC_POST_NAMES[platform] + '正在读取，请稍后再试。');
     const blocked = this.blocked.get(platform);
-    if (blocked && !options.checkConnection) throw blocked;
+    if (blocked && !options.checkConnection) throw new PlatformError('已沿用上次的暂停记录，本次未访问官网。' + blocked.message, blocked.kind);
+    if (this.reading.has(platform)) throw Error(PUBLIC_POST_NAMES[platform] + '正在读取，请稍后再试。');
     this.reading.add(platform);
     let context: BrowserContext | undefined = login;
     let verified = false;
     const abort = () => { if (!login) void context?.close().catch(() => {}); };
     signal.addEventListener('abort', abort, { once: true });
     try {
-      context ??= await this.launch(platform, true);
+      context ??= await this.launch(platform, !options.showWorkWindow);
       signal.throwIfAborted();
       if (!login) await context.route('**/*', route => {
         const request = route.request();
@@ -118,7 +134,13 @@ export class PublicPostBrowser {
         const tiebaRead = platform === 'tieba' && request.method() === 'POST' && request.resourceType() === 'xhr' &&
           address.origin === POST_ORIGINS.tieba && address.pathname === '/c/f/pb/page_pc' &&
           /^https:\/\/tieba\.baidu\.com\/p\/\d+(?:[/?#]|$)/.test(request.frame().url());
-        if (!tiebaRead && !['GET', 'HEAD', 'OPTIONS'].includes(request.method()) && !options.allowWrite?.(request)) return route.abort();
+        let noteRead = false;
+        const noteId = options.readNote?.()?.id;
+        if (platform === 'xiaohongshu' && noteId && request.method() === 'POST' &&
+            address.origin === 'https://edith.xiaohongshu.com' && address.pathname === '/api/sns/web/v1/feed') {
+          try { noteRead = request.postDataJSON()?.source_note_id === noteId; } catch { /* unrelated request */ }
+        }
+        if (!tiebaRead && !noteRead && !['GET', 'HEAD', 'OPTIONS'].includes(request.method()) && !options.allowWrite?.(request)) return route.abort();
         if (request.resourceType() === 'font' || (!options.media && ['media', 'image'].includes(request.resourceType()))) return route.abort();
         if (address.protocol !== 'https:' || address.port || address.username || address.password) return route.abort();
         const site = platform === 'tieba' ? /(?:^|\.)(?:baidu\.com|bdstatic\.com|baidubce\.com)$/i : /(?:^|\.)(?:xiaohongshu\.com|xhscdn\.com|rednote\.com)$/i;
@@ -136,10 +158,20 @@ export class PublicPostBrowser {
       const result = await run(page ?? await context.newPage());
       signal.throwIfAborted();
       verified = true;
-      if (options.checkConnection) this.blocked.delete(platform);
+      if (options.checkConnection) {
+        const pending = this.recoveryNote(platform), checked = options.readNote?.();
+        if (!pending || (checked?.id === pending.id && checked.ownerId === pending.ownerId)) {
+          this.blocked.delete(platform);
+          if (platform === 'xiaohongshu') this.restrictedNote = undefined;
+        }
+      }
       return result;
     } catch (error) {
-      if (error instanceof PlatformError && ['auth', 'rate'].includes(error.kind)) this.blocked.set(platform, error);
+      if (error instanceof PlatformError && ['auth', 'rate'].includes(error.kind)) {
+        this.blocked.set(platform, error);
+        const note = options.readNote?.();
+        if (platform === 'xiaohongshu' && note) this.restrictedNote = { ...note };
+      }
       if (signal.aborted) throw Error('本次读取已取消。');
       if (error instanceof Error && !/^(?:page|locator|browserContext)\./.test(error.message)) throw error;
       const action = error instanceof Error ? error.message.match(/^(page|locator|browserContext)\.([A-Za-z]+)/)?.[2] : undefined;
@@ -183,8 +215,11 @@ export class PublicPostBrowser {
 
 async function verifyPublicPage(page: import('playwright-core').Page, status: number | undefined, expected: URL) {
   const current = new URL(page.url());
-  if (current.hostname === 'www.xiaohongshu.com' && current.pathname === '/website-login/error' && /安全限制/.test(await page.title()))
-    throw new PlatformError('小红书将本次访问转到了「安全限制」页，请在专用窗口查看官网提示。', 'rate');
+  if (current.hostname === 'www.xiaohongshu.com' && current.pathname === '/website-login/error') {
+    const notice = page.getByText(/安全限制|检测到异常访问/).first();
+    if (/安全限制/.test(await page.title()) || await notice.waitFor({ state: 'visible', timeout: 1800 }).then(() => true, () => false))
+      throw new PlatformError('小红书提示「安全限制」，本次访问已暂停。请在专用窗口查看官网提示；若只提供反馈入口，请等待平台解除限制。', 'rate');
+  }
   if (/login|passport/i.test(current.hostname + current.pathname)) throw new PlatformError('平台要求登录。请在配置页打开该平台的专用登录窗口。', 'auth');
   if (/captcha|verify|security/i.test(current.pathname) || /安全验证|人机验证/.test(await page.title()))
     throw new PlatformError('平台要求人工验证。请在专用登录窗口处理，完成后关闭窗口再试。', 'auth');
@@ -293,6 +328,22 @@ export class PublicPostAdapter implements SocialPlatform {
   }
 
   async reconnect(signal?: AbortSignal) {
+    const pending = this.browser.recoveryNote(this.id);
+    const account = await this.checkLogin(signal);
+    if (pending) {
+      await this.run(profileUrl(this.id, pending.ownerId), signal, async page => {
+        await this.openOwnerNote(page, pending.id);
+        const work = await this.readPost(page, pending.id);
+        if (work.ownerId !== pending.ownerId || (await this.accountForReply(page)).id !== account.id)
+          throw new PlatformError('当前笔记或账号与复查目标不符，保留暂停。', 'auth');
+        await checkAccessNotice(page);
+        await page.locator('.engage-bar .input-box, #content-textarea, .comment-input [contenteditable="true"]').filter({ visible: true }).first().waitFor({ timeout: 5000 });
+      }, { checkConnection: true, media: true, showWorkWindow: true, readNote: () => pending });
+    }
+    return account;
+  }
+
+  private async checkLogin(signal?: AbortSignal) {
     if (this.browser.loginOpen(this.id)) {
       return this.browser.withPublicPage(this.id, defaultSignal(signal), async page => {
         const current = URL.parse(page.url());
@@ -327,22 +378,27 @@ export class PublicPostAdapter implements SocialPlatform {
   private async tiebaProfileFromMenu(page: Page): Promise<Account | undefined> {
     const header = page.locator('header, #com_userbar, #head, [class*="header" i], [class*="navbar" i]');
     const currentAvatar = page.locator('.user-or-login img.user-avatar').filter({ visible: true });
+    await currentAvatar.first().waitFor({ state: 'visible', timeout: 2200 }).catch(() => {});
     const avatar = await currentAvatar.count() === 1 ? currentAvatar :
       header.locator('img[class*="avatar" i], [class*="avatar" i] img, img[src*="/sys/portrait/"]').filter({ visible: true });
     const entry = page.getByRole('listitem').filter({ hasText: /^\s*个人主页\s*$/u }).filter({ visible: true });
     if (!(await entry.count())) {
       if (await avatar.count() !== 1) return;
       await avatar.hover({ timeout: 1500 }).catch(() => {});
-      if (await entry.count() !== 1) await avatar.click({ timeout: 1500 }).catch(() => {});
+      await entry.first().waitFor({ state: 'visible', timeout: 1200 }).catch(() => {});
+      if (!await entry.count()) {
+        await avatar.click({ timeout: 1500 }).catch(() => {});
+        await entry.first().waitFor({ state: 'visible', timeout: 2000 }).catch(() => {});
+      }
     }
     if (await entry.count() !== 1) return;
     const links = await this.ownLinks(page);
     if (links.size) return links.size === 1 ? links.values().next().value : undefined;
     const isProfile = (url: URL) => Boolean(profileId('tieba', url.href));
     const opened = Promise.any([
-      page.waitForURL(isProfile, { waitUntil: 'domcontentloaded', timeout: 4500 }).then(() => page),
-      page.waitForEvent('popup', { timeout: 4500 }).then(async popup => {
-        await popup.waitForURL(isProfile, { timeout: 4500 });
+      page.waitForURL(isProfile, { waitUntil: 'commit', timeout: 10000 }).then(() => page),
+      page.waitForEvent('popup', { timeout: 10000 }).then(async popup => {
+        await popup.waitForURL(isProfile, { waitUntil: 'commit', timeout: 10000 });
         return popup;
       }),
     ]).catch(() => undefined);
@@ -469,7 +525,31 @@ export class PublicPostAdapter implements SocialPlatform {
     });
   }
 
+  private async openOwnerNote(page: Page, id: string) {
+    const card = page.locator('a[href*="/' + id + '"]').filter({ visible: true }).first();
+    const href = await card.getAttribute('href', { timeout: 7000 });
+    if (!href || publicPostUrl(this.id, new URL(href, page.url()).href).pathname.split('/').filter(Boolean).at(-1) !== id)
+      throw new PlatformError('主人主页未找到对应笔记。', 'rejected');
+    // A server-rendered cover is already clickable before the site's note viewer is mounted.
+    // Following its raw href at that point causes a different, full-document navigation.
+    try {
+      await page.waitForFunction(() => {
+        const root = document.getElementById('app');
+        return !root || Boolean((root as HTMLElement & { __vue_app__?: unknown }).__vue_app__);
+      }, undefined, { timeout: 10000 });
+    } catch (error) {
+      if (!(error instanceof Error) || error.name !== 'TimeoutError') throw error;
+      await checkAccessNotice(page);
+      throw new PlatformError('作者主页已显示封面，但笔记交互尚未就绪，未点击封面。', 'rejected');
+    }
+    await card.click({ timeout: 5000 });
+    await page.waitForURL(u => u.pathname.split('/').filter(Boolean).at(-1) === id || u.pathname.startsWith('/website-login/'),
+      { waitUntil: 'domcontentloaded', timeout: 8000 }).catch(() => {});
+    await verifyPublicPage(page, undefined, this.paths.get(id));
+  }
+
   async creatorVideos(ownerId: string, limit: number, signal?: AbortSignal) {
+    let wantedNote: string | undefined;
     const url = this.profiles.get(ownerId) ?? profileUrl(this.id, ownerId);
     return this.run(url, signal, async page => {
       const identity = profileId(this.id, page.url());
@@ -480,9 +560,18 @@ export class PublicPostAdapter implements SocialPlatform {
       const verified = [];
       for (const item of items.slice(0, 3)) {
         try {
-          const target = this.paths.get(item.id);
-          const response = await page.goto(target.href, { waitUntil: 'domcontentloaded', timeout: 9000 });
-          await verifyPublicPage(page, response?.status(), target);
+          if (this.id === 'xiaohongshu') {
+            if (page.url() !== url.href) {
+              const res = await page.goto(url.href, { waitUntil: 'domcontentloaded', timeout: 9000 });
+              await verifyPublicPage(page, res?.status(), url);
+            }
+            wantedNote = item.id;
+            await this.openOwnerNote(page, item.id);
+          } else {
+            const target = this.paths.get(item.id);
+            const res = await page.goto(target.href, { waitUntil: 'domcontentloaded', timeout: 9000 });
+            await verifyPublicPage(page, res?.status(), target);
+          }
           const detail = await this.readPost(page, item.id);
           if (detail.ownerId === ownerId) verified.push(detail);
         } catch (error) {
@@ -492,7 +581,7 @@ export class PublicPostAdapter implements SocialPlatform {
       }
       if (items.length && !verified.length) throw new PlatformError('已找到主人主页的作品列表，但还未核实其中的原作者。');
       return { items: verified };
-    }, { media: true });
+    }, { media: true, readNote: () => wantedNote ? { id: wantedNote, ownerId } : undefined });
   }
 
   private async readPost(page: Page, id: string): Promise<Video> {
@@ -603,7 +692,10 @@ export class PublicPostAdapter implements SocialPlatform {
   }
 
   private async findXiaohongshuRoot(page: Page, root: string, signal?: AbortSignal) {
-    const row = this.xiaohongshuTopRows(page).and(this.xiaohongshuCommentRow(page, root));
+    const topRows = this.xiaohongshuTopRows(page);
+    // The note body may be ready while the comment list is still mounting.
+    if (!await topRows.count()) await topRows.first().waitFor({ state: 'visible', timeout: 4500 }).catch(() => {});
+    const row = topRows.and(this.xiaohongshuCommentRow(page, root));
     for (let load = 0; load < 8 && !await row.count(); load++) {
       signal?.throwIfAborted();
       if (!await this.loadXiaohongshuRoots(page)) break;
@@ -616,6 +708,10 @@ export class PublicPostAdapter implements SocialPlatform {
     const thread = page.locator('.comments-container .parent-comment').filter({ has: rootRow });
     const more = thread.locator(':scope > .reply-container .show-more').filter({ visible: true });
     const replies = thread.locator(':scope > .reply-container .comment-item').filter({ visible: true });
+    if (until) {
+      const target = replies.and(this.xiaohongshuCommentRow(page, until));
+      await more.or(target).first().waitFor({ state: 'visible', timeout: 3500 }).catch(() => {});
+    }
     for (let load = 0; load < maxLoads && await more.count() === 1; load++) {
       signal?.throwIfAborted();
       if (until && await replies.and(this.xiaohongshuCommentRow(page, until)).count()) break;
@@ -878,6 +974,9 @@ export class PublicPostAdapter implements SocialPlatform {
   }
 
   private async tiebaReplyRow(page: Page, id: string) {
+    const modern = page.locator('.pb-comment-item[data-id="' + id + '"]').filter({ visible: true });
+    await page.locator(this.ui.comments).first().waitFor({ state: 'attached', timeout: 6000 }).catch(() => {});
+    if (await modern.count() === 1) return modern;
     const rows = page.locator(this.ui.comments).filter({ visible: true });
     const fields = await rows.evaluateAll((nodes, targetId) => nodes.slice(0, 30).flatMap(row => {
       const field = row.getAttribute('data-field');
@@ -921,7 +1020,8 @@ export class PublicPostAdapter implements SocialPlatform {
     const original = rows.filter(entry => entry.id === reply.parent && entry.target.root === reply.root &&
       entry.authorId && entry.authorId !== expectedAccountId);
     if (original.length !== 1) throw new PlatformError('官网未能唯一确认原评论和作者；未提交。', 'rejected');
-    if (this.id === 'tieba') {
+    const modernTieba = this.id === 'tieba' && await row.getAttribute('data-id') === reply.parent;
+    if (this.id === 'tieba' && !modernTieba) {
       const data = JSON.parse(await row.getAttribute('data-field') || '{}');
       if (String(data.content?.post_id) !== reply.parent)
         throw new PlatformError('原楼层编号无法核实；未提交。', 'rejected');
@@ -930,14 +1030,15 @@ export class PublicPostAdapter implements SocialPlatform {
     const replyControl = this.id === 'xiaohongshu'
       ? replyText.and(row.locator(':not(.interactions .reply.icon-container:has(svg.reply-icon) *)'))
         .or(row.locator('.interactions .reply.icon-container:has(svg.reply-icon)'))
-      : replyText;
+      : modernTieba ? row.locator(':scope > .comment-content .pc-pb-comments-desc .reply-container .reply').and(replyText)
+        .and(page.locator(':not(.pb-lzl-item *, .sub-comment-item *, .sub-comment-list *)')) : replyText;
     const button = replyControl.filter({ visible: true });
     if (await button.count() !== 1) throw new PlatformError('原楼层没有唯一的回复入口；未提交。', 'rejected');
     await button.click({ timeout: 3000 });
     return row;
   }
 
-  async send(target: CommentTarget, text: string, signal?: AbortSignal, expectedAccountId?: string): Promise<SendReceipt> {
+  async send(target: CommentTarget, text: string, signal?: AbortSignal, expectedAccountId?: string, _mention?: unknown, verifiedWorkOwner?: string): Promise<SendReceipt> {
     const reply = this.normalizeTarget(target);
     const standalone = reply.parent === '0';
     if (this.id === 'tieba' && (standalone || reply.root !== reply.parent))
@@ -945,21 +1046,23 @@ export class PublicPostAdapter implements SocialPlatform {
     if (!expectedAccountId) throw new PlatformError('缺少预先核对的发送账号；未提交。', 'rejected');
     let clicked = false;
     let dispatched = false;
+    const startedAt = Math.floor(Date.now() / 1000);
     let responseIssue = '';
     const matches = (request: Request) => exactReplyRequest(this.id, request, reply, text);
     try {
-      return await this.run(this.paths.get(reply.oid), signal, async page => {
+      const note = this.paths.get(reply.oid);
+      const owner = this.id === 'xiaohongshu' && verifiedWorkOwner && (standalone || !note.search)
+        ? profileUrl(this.id, verifiedWorkOwner) : undefined;
+      return await this.run(owner ?? note, signal, async page => {
+        if (owner) {
+          await this.openOwnerNote(page, reply.oid);
+          const displayed = await this.readPost(page, reply.oid);
+          if (displayed.ownerId !== verifiedWorkOwner)
+            throw new PlatformError('笔记中显示的作者与已核实的主人不一致，未提交。', 'rejected');
+        }
         if ((await this.accountForReply(page)).id !== expectedAccountId)
           throw new PlatformError('网页账号已更换；未提交。', 'rejected');
         const scope = standalone ? page : await this.openReplyBox(page, reply, expectedAccountId);
-        if (standalone) {
-          const editor = page.locator('#content-textarea, .comment-input [contenteditable="true"]').filter({ visible: true });
-          if (!(await editor.count())) {
-            const entry = page.locator('.engage-bar .input-box').filter({ visible: true });
-            try { await entry.click({ timeout: 5000 }); }
-            catch { await checkAccessNotice(page); throw new PlatformError('主人作品评论入口未出现或无法点击；未提交。', 'rejected'); }
-          }
-        }
         const composer = this.id === 'tieba'
           ? scope.locator('textarea, [contenteditable="true"]').filter({ visible: true })
           : page.locator('#content-textarea, .comment-input [contenteditable="true"]').filter({ visible: true });
@@ -968,6 +1071,18 @@ export class PublicPostAdapter implements SocialPlatform {
           : page.getByRole('button', { name: /^(发送|发表|发布)$/ })
             .and(page.locator('button.submit, .comment-input button, .interactions button')))
           .filter({ visible: true });
+        if (standalone && (!(await composer.count()) || !(await send.count()))) {
+          const entry = page.locator('.engage-bar .input-box').filter({ visible: true });
+          try {
+            await entry.click({ timeout: 5000 });
+            await composer.waitFor({ state: 'visible', timeout: 4000 });
+            await send.waitFor({ state: 'visible', timeout: 4000 });
+          } catch {
+            await verifyPublicPage(page, undefined, this.paths.get(reply.oid));
+            await checkAccessNotice(page);
+            throw new PlatformError('一级评论框没有展开或未显示发送按钮，未提交。', 'rejected');
+          }
+        }
         if (await composer.count() !== 1 || await send.count() !== 1)
           throw new PlatformError('官网回复编辑框或发送按钮无法唯一核实；未提交。', 'rejected');
         const old = await composer.evaluate(el => (el instanceof HTMLTextAreaElement || el instanceof HTMLInputElement ? el.value : el.textContent) || '');
@@ -980,12 +1095,28 @@ export class PublicPostAdapter implements SocialPlatform {
         await verifyPublicPage(page, undefined, this.paths.get(reply.oid));
         const response = page.waitForResponse(res => matches(res.request()), { timeout: 9000 }).catch(() => undefined);
         clicked = true;
-        await send.click({ timeout: 4000 });
+        try {
+          await send.click({ timeout: 4000 });
+        } catch (error) {
+          if (!standalone || dispatched) throw error;
+          await verifyPublicPage(page, undefined, this.paths.get(reply.oid));
+          await checkAccessNotice(page);
+          const disabled = await send.isDisabled({ timeout: 500 }).catch(() => false);
+          throw new PlatformError(disabled ? '官网没有启用一级评论发送按钮，未提交。' : '一级评论发送按钮无法点击，未观察到提交请求。', 'rejected');
+        }
         const receipt = await response;
         const data = await receipt?.json().catch(() => undefined);
-        const id = this.id === 'tieba' ? data?.data?.post_id ?? data?.data?.pid : data?.data?.comment?.id;
+        let id = this.id === 'tieba' ? data?.data?.post_id ?? data?.data?.pid : data?.data?.comment?.id;
         const accepted = receipt?.ok() && (this.id === 'tieba' ? Number(data?.no ?? data?.error_code) === 0 : data?.success === true);
         if (!dispatched) throw new PlatformError('官网未生成与原评论和正文一致的回复请求，未提交。', 'rejected');
+        if (accepted && !id && this.id === 'tieba' && expectedAccountId) {
+          // The modern editor can return success without a comment ID. Only reread the thread.
+          const loaded = page.waitForResponse(res => res.url().split('?')[0] === POST_ORIGINS.tieba + '/c/f/pb/page_pc'
+            && res.request().frame() === page.mainFrame() && res.ok(), { timeout: 9000 }).catch(() => undefined);
+          await page.reload({ waitUntil: 'domcontentloaded', timeout: 10000 }).catch(() => {});
+          const thread = await (await loaded)?.json().catch(() => undefined);
+          id = findTiebaReceipt(thread, reply, text, expectedAccountId, startedAt);
+        }
         if (!accepted || !id || !/^[a-z0-9_-]{1,64}$/i.test(String(id))) {
           const code = data?.code ?? data?.no ?? data?.error_code;
           const platformCode = /^-?\d{1,10}$/.test(String(code)) ? '，平台代码 ' + code : '';
@@ -995,7 +1126,7 @@ export class PublicPostAdapter implements SocialPlatform {
           throw new PlatformError(responseIssue, 'network');
         }
         return { receiptId: String(id), transport: 'browser' };
-      }, { allowWrite: request => {
+      }, { showWorkWindow: Boolean(owner), media: Boolean(owner), readNote: verifiedWorkOwner && owner ? () => ({ id: reply.oid, ownerId: verifiedWorkOwner }) : undefined, allowWrite: request => {
         if (!clicked || dispatched || !matches(request)) return false;
         dispatched = true;
         return true;
@@ -1005,6 +1136,27 @@ export class PublicPostAdapter implements SocialPlatform {
       throw new PlatformError(error instanceof Error ? error.message : '回复页面准备失败；未提交。', 'rejected');
     }
   }
+}
+
+interface TiebaPublicThread {
+  thread?: { id?: number | string };
+  user_list?: { id?: number | string; portrait?: string }[];
+  post_list?: { id?: number | string; sub_post_list?: { sub_post_list?: {
+    id?: number | string; author_id?: number | string; time?: number; content?: { type?: number; text?: string }[]
+  }[] } }[];
+}
+export function findTiebaReceipt(thread: TiebaPublicThread | undefined, target: CommentTarget, text: string, account: string, since: number) {
+  if (target.root !== target.parent || String(thread?.thread?.id) !== target.oid ||
+      !Array.isArray(thread?.user_list) || !Array.isArray(thread.post_list)) return;
+  const authors = new Set(thread.user_list.filter(u => u.id != null && u.portrait?.split('?')[0] === account).map(u => String(u.id)));
+  const floor = thread.post_list.filter(p => String(p.id) === target.parent);
+  const children = floor.length === 1 && floor[0].sub_post_list?.sub_post_list;
+  if (!Array.isArray(children) || authors.size !== 1) return;
+  const matches = children.filter(c => authors.has(String(c.author_id)) &&
+    Number(c.time) >= since - 5 && Number(c.time) <= Date.now() / 1000 + 5 &&
+    Array.isArray(c.content) && c.content.length === 1 && c.content[0].text === text &&
+    (typeof c.id === 'string' || Number.isSafeInteger(c.id)) && /^[1-9]\d*$/.test(String(c.id)));
+  return matches.length === 1 ? String(matches[0].id) : undefined;
 }
 
 function exactReplyRequest(platform: PublicPostPlatform, req: Request, target: CommentTarget, text: string) {
@@ -1020,8 +1172,11 @@ function exactReplyRequest(platform: PublicPostPlatform, req: Request, target: C
       return body.note_id === target.oid && exactTarget && body.content === text;
     } catch { return false; }
   }
-  if (url.origin !== POST_ORIGINS.tieba || url.pathname !== '/f/commit/post/add') return false;
-  const fields = new URLSearchParams(req.postData() || '');
-  return fields.get('tid') === target.oid && (fields.get('quote_id') || fields.get('reply_to_pid')) === target.parent &&
-    fields.get('content') === text;
+  if (url.origin !== POST_ORIGINS.tieba || !['/f/commit/post/add', '/c/c/post/add_pc'].includes(url.pathname)) return false;
+  try {
+    const fields = req.postDataJSON();
+    const parents = [fields.quote_id, fields.reply_to_pid, fields.repostid].filter(v => v != null && v !== '');
+    return String(fields.tid) === target.oid && parents.length > 0 && parents.every(id => String(id) === target.parent) &&
+      fields.content === text;
+  } catch { return false; }
 }

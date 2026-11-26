@@ -23,6 +23,7 @@ describe.skipIf(!findBrowserExecutable())('Douyin real-browser offline boundarie
       verification?: boolean;
       checkpoint?: { load(): DouyinVerificationCheckpoint | undefined; save(value?: DouyinVerificationCheckpoint): void };
       userSearch?: boolean;
+      videoSearch?: 'loading' | 'ready';
       needsRefresh?: boolean;
       movingIcon?: boolean;
       delayedCommentIcon?: boolean;
@@ -131,6 +132,13 @@ describe.skipIf(!findBrowserExecutable())('Douyin real-browser offline boundarie
                 ],
               }),
             });
+          if (options.videoSearch && path.startsWith('/search/')) return route.fulfill({
+            contentType: 'text/html', body: options.videoSearch === 'loading' ? '<main>加载中</main>' :
+              '<script>fetch("/aweme/v1/web/general/search/single/?keyword=fixture")</script>',
+          });
+          if (options.videoSearch && path === '/aweme/v1/web/general/search/single/') return route.fulfill({
+            json: { status_code: 0, data: [{ aweme_info: { aweme_id: id, desc: 'fixture', author: { nickname: '作者' } } }] },
+          });
           if (options.userSearch && path.startsWith('/search/'))
             return route.fulfill({
               contentType: 'text/html',
@@ -953,6 +961,23 @@ describe.skipIf(!findBrowserExecutable())('Douyin real-browser offline boundarie
       await f.cleanup();
     }
   });
+  it('clears the persisted search challenge only after the original query returns a video', async () => {
+    let saved: DouyinVerificationCheckpoint | undefined;
+    const options = { verification: true, videoSearch: 'loading' as 'loading' | 'ready',
+      checkpoint: { load: () => saved, save: (v?: DouyinVerificationCheckpoint) => { saved = v; } } };
+    const f = await fixture(options);
+    try {
+      await expect(f.adapter.search('fixture')).rejects.toThrow('人工验证');
+      options.verification = false;
+      f.adapter.resumeVerificationChecks();
+      await expect(f.adapter.checkPendingVideoSearch()).rejects.toThrow('原搜索页');
+      expect(saved?.verification.paused).toBe(true);
+      options.videoSearch = 'ready';
+      await expect(f.adapter.checkPendingVideoSearch()).resolves.toBe(true);
+      expect(saved).toBeUndefined();
+      expect(f.accepted()).toBe(0);
+    } finally { await f.cleanup(); }
+  }, 18000);
   it('keeps a blocked search paused across a restart and opens only its original page for the user', async () => {
     let saved: DouyinVerificationCheckpoint | undefined;
     const checkpoint = { load: () => saved, save: (value?: DouyinVerificationCheckpoint) => { saved = value; } };

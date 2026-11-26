@@ -1,8 +1,8 @@
 {
   "name": "cortico-world-social-media",
-  "version": "0.6.13",
+  "version": "0.6.14",
   "type": "module",
-  "description": "小鲸鱼爱冲浪：在 B 站、抖音、小红书和贴吧读作品、看评论并特别关注主人。按平台设置闲逛和评论权限，可选语料学习与 Gemini 网页陪练。百度贴吧为实验接入。",
+  "description": "小鲸鱼爱冲浪：在 B 站、抖音、小红书和贴吧读作品、看评论并特别关注主人。按平台设置闲逛和评论权限，可选语料学习与 Gemini 网页陪练。小红书和贴吧为实验接入。",
   "license": "MIT",
   "engines": {
     "node": ">=22.16"
@@ -25,8 +25,8 @@
     "api": 6,
     "displayName": "小鲸鱼爱冲浪",
     "describe": "describe.json",
-    "webUiClient": "dist/webui-surf-idle-clock.js",
-    "webUiStyle": "dist/webui-surf-idle-clock.css",
+    "webUiClient": "dist/webui-surf-owner-quota.js",
+    "webUiStyle": "dist/webui-surf-owner-quota.css",
     "tags": [
       "video",
       "browser",
@@ -39,18 +39,18 @@
     "locales": {
       "zh": {
         "displayName": "小鲸鱼爱冲浪",
-        "description": "小鲸鱼爱冲浪：在 B 站、抖音、小红书和贴吧读作品、看评论并特别关注主人。按平台设置闲逛和评论权限，可选语料学习与 Gemini 网页陪练。百度贴吧为实验接入。"
+        "description": "小鲸鱼爱冲浪：在 B 站、抖音、小红书和贴吧读作品、看评论并特别关注主人。按平台设置闲逛和评论权限，可选语料学习与 Gemini 网页陪练。小红书和贴吧为实验接入。"
       },
       "en": {
         "displayName": "Little Whale Loves Surfing",
-        "description": "Browse works and comments on Bilibili, Douyin, Xiaohongshu and Tieba. Configure owner focus, browsing and comment permissions by platform. Includes optional expression learning and Gemini web coaching. Tieba is experimental."
+        "description": "Browse works and comments on Bilibili, Douyin, Xiaohongshu and Tieba. Configure owner focus, browsing and comment permissions by platform. Includes optional expression learning and Gemini web coaching. Xiaohongshu and Tieba are experimental."
       }
     }
   },
   "files": [
     "src",
-    "dist/webui-surf-idle-clock.js",
-    "dist/webui-surf-idle-clock.css",
+    "dist/webui-surf-owner-quota.js",
+    "dist/webui-surf-owner-quota.css",
     "describe.json",
     "README.md",
     "CHANGELOG.md",

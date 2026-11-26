@@ -1,9 +1,27 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { chromium, type Browser, type Page } from 'playwright-core';
 import { findBrowserExecutable } from '../src/platforms/bilibili-browser.ts';
-import { PublicPostAdapter, PublicPostBrowser } from '../src/platforms/public-posts.ts';
+import { findTiebaReceipt, PublicPostAdapter, PublicPostBrowser } from '../src/platforms/public-posts.ts';
+import { PlatformError } from '../src/platform.ts';
 import { POST_ORIGINS, POST_VISUAL_LEVELS, profileId } from '../src/public-post-policy.ts';
 import { settingsPatch } from '../src/settings.ts';
+
+it('recovers a missing Tieba receipt only for one recent exact reply by the bound account on the original floor', () => {
+  const now = Math.floor(Date.now() / 1000);
+  const child = { id: '13', content: [{ text: '看到啦。' }], time: now, author_id: 8 };
+  const children = [child];
+  const thread = { thread: { id: '11' }, user_list: [{ id: 8, portrait: 'tb.bot' }],
+    post_list: [{ id: '12', sub_post_list: { sub_post_list: children } }] };
+  const target = { oid: '11', parent: '12', root: '12', type: 4 };
+  expect(findTiebaReceipt(thread, target, '看到啦。', 'tb.bot', now)).toBe('13');
+  expect(findTiebaReceipt(thread, target, '看到啦。', 'tb.other', now)).toBeUndefined();
+  expect(findTiebaReceipt(thread, { ...target, oid: '88' }, '看到啦。', 'tb.bot', now)).toBeUndefined();
+  expect(findTiebaReceipt(thread, { ...target, root: '77', parent: '77' }, '看到啦。', 'tb.bot', now)).toBeUndefined();
+  expect(findTiebaReceipt(thread, target, '看到啦。', 'tb.bot', now + 90)).toBeUndefined();
+  expect(findTiebaReceipt(thread, target, '不同正文', 'tb.bot', now)).toBeUndefined();
+  children.push({ ...child, id: '14' });
+  expect(findTiebaReceipt(thread, target, '看到啦。', 'tb.bot', now)).toBeUndefined();
+});
 
 const work = '0123456789abcdef01234567';
 const owner = '1123456789abcdef01234567';
@@ -49,9 +67,15 @@ describe.skipIf(!findBrowserExecutable())('public post adapter on an offline Chr
     const self = selfLayout ?? '<aside><a href="/user/profile/' + account + '">我的主页</a></aside>';
     const noteRoute = creatorRoute ? '/user/profile/' + owner + '/' + work : '/explore/' + work;
     const list = '<main><a href="' + noteRoute + '?xsec_token=fixture">周末散步</a></main>';
+    // The live profile renders the signed cover before Vue attaches its click handler.
+    const needsHydration = creatorRoute && standaloneComment;
+    const profileList = needsHydration ? '<div id="app">' + list + '</div><script>' +
+      'setTimeout(() => {const app=document.querySelector("#app"); app.querySelector("a").onclick=e=>{' +
+      'e.preventDefault();location.assign(e.currentTarget.href+"&opened=card")};app.__vue_app__={}},650)</script>' : list;
     const newCommentEntry = standaloneComment
       ? '<div class="engage-bar"><div class="input-box" onclick="document.querySelector(\'#fixture-editor\').hidden=false"><input placeholder="说点什么..."/></div></div>'
       : '';
+    const compactEditor = '<div class="engage-bar"><div class="input-box" onclick="document.querySelector(\'#send\').hidden=false"><textarea id="content-textarea"></textarea></div><button id="send" hidden class="submit">发送</button></div>';
     const post = self + '<div class="note-container"><a href="/user/profile/' + owner + '">主人</a><h1 id="detail-title">雨中散步</h1>' +
       '<div id="detail-desc">先逛公园再去喝茶。</div>' + media + '</div>' +
       '<div class="comments-container"><div class="comment-item" id="comment-' + comment + '">' +
@@ -62,7 +86,7 @@ describe.skipIf(!findBrowserExecutable())('public post adapter on an offline Chr
         ? '<div class="interactions"><div class="reply icon-container" onclick="document.querySelector(\'#fixture-editor\').hidden=false"><svg class="reply-icon"></svg><span>' + replyLabel + '</span></div></div>'
         : '<button onclick="document.querySelector(\'#fixture-editor\').hidden=false">回复</button>') + '</div></div>' +
       '<div class="' + (delayedComment ? 'note-comment-editor' : 'comment-input') +
-        '" id="fixture-editor" hidden><textarea id="content-textarea"></textarea><button id="send" class="btn submit">发送</button></div>' + newCommentEntry +
+        '" id="fixture-editor" hidden>' + (replyLabel === 'compact' ? '</div>' + compactEditor : '<textarea id="content-textarea"></textarea><button id="send" class="btn submit">发送</button></div>' + newCommentEntry) +
       '<script>document.querySelector("#send").onclick = async () => {' +
       'const body = JSON.stringify({note_id:"' + work + '",' +
       (standaloneComment && !wrongTarget ? '' : 'target_comment_id:"' + (wrongTarget ? commenter : comment) + '",') +
@@ -88,14 +112,14 @@ describe.skipIf(!findBrowserExecutable())('public post adapter on an offline Chr
           if (at.origin !== POST_ORIGINS.xiaohongshu || req.resourceType() !== 'document') return route.abort();
           return route.fulfill({
             contentType: 'text/html; charset=utf-8',
-            body: at.pathname === noteRoute && (!creatorRoute || at.searchParams.get('xsec_token') === 'fixture') ? post :
-              at.pathname === '/user/profile/' + owner ? '<h1>主人</h1>' + list : self + list,
+            body: at.pathname === noteRoute && (!creatorRoute || at.searchParams.get('xsec_token') === 'fixture') && (!needsHydration || at.searchParams.get('opened') === 'card') ? post :
+              at.pathname === '/user/profile/' + owner ? '<h1>主人</h1>' + profileList : self + list,
           });
         });
         return await run(await context.newPage());
       } finally { await context.close(); }
     });
-    return { adapter: new PublicPostAdapter('xiaohongshu', backend), writes };
+    return { adapter: new PublicPostAdapter('xiaohongshu', backend), backend, writes };
   }
 
   it('resumes a Xiaohongshu comment sweep across a long thread and scroll-loaded roots', async () => {
@@ -197,6 +221,54 @@ describe.skipIf(!findBrowserExecutable())('public post adapter on an offline Chr
     expect(frames[0].bytes.equals(frames[1].bytes)).toBe(false);
   });
 
+  it.each([false, true])('waits for an active reader and respects its restriction (%s)', async restricted => {
+    const backend = new PublicPostBrowser('unused');
+    const launch = vi.spyOn(backend as any, 'launch').mockImplementation(() => browser.newContext());
+    const signal = AbortSignal.timeout(5000);
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const reading = backend.withPublicPage('xiaohongshu', signal, async () => {
+      await gate;
+      if (restricted) throw new PlatformError('安全限制', 'rate');
+    }).catch(error => error.message);
+    const perform = vi.fn(async () => 'ready');
+    const waiting = backend.withPublicPage('xiaohongshu', signal, perform, { allowWrite: () => false });
+    expect(perform).not.toHaveBeenCalled();
+    release();
+    if (restricted) await expect(waiting).rejects.toThrow('本次未访问官网');
+    else await expect(waiting).resolves.toBe('ready');
+    await reading;
+    expect(perform).toHaveBeenCalledTimes(restricted ? 0 : 1);
+    expect(launch).toHaveBeenCalledTimes(restricted ? 1 : 2);
+  });
+
+  it('keeps a note restriction through an unrelated login check and distinguishes a skipped visit', async () => {
+    const backend = new PublicPostBrowser('unused');
+    const launch = vi.spyOn(backend as any, 'launch').mockImplementation(() => browser.newContext());
+    const signal = AbortSignal.timeout(10000);
+    const note = { ownerId: owner, id: work };
+    const visit = (run: () => Promise<void>, checkConnection = false, readNote?: () => typeof note) =>
+      backend.withPublicPage('xiaohongshu', signal, run, { checkConnection, readNote });
+    await expect(visit(async () => { throw new PlatformError('安全限制', 'rate'); }, false, () => note)).rejects.toThrow('安全限制');
+    await visit(async () => {}, true);
+    await visit(async () => {}, true, () => ({ ...note, id: comment }));
+    const before = launch.mock.calls.length;
+    await expect(visit(async () => {})).rejects.toThrow('本次未访问官网');
+    expect(launch).toHaveBeenCalledTimes(before);
+    expect(backend.recoveryNote('xiaohongshu')).toEqual(note);
+    await visit(async () => {}, true, () => note);
+    expect(backend.paused('xiaohongshu')).toBeUndefined();
+    expect(backend.recoveryNote('xiaohongshu')).toBeUndefined();
+  });
+
+  it('rechecks the original restricted note and its comment entry without submitting a comment', async () => {
+    const { backend, adapter, writes } = fixture(false, undefined, false, true, false, false, true);
+    vi.spyOn(backend, 'recoveryNote').mockReturnValue({ ownerId: owner, id: work });
+    await expect(adapter.reconnect()).resolves.toMatchObject({ id: account });
+    expect(backend.withPublicPage).toHaveBeenCalledTimes(2);
+    expect(writes).toHaveLength(0);
+  });
+
   it('binds the existing login page and keeps it open if verification is still needed', async () => {
     const backend = new PublicPostBrowser('unused');
     const context = await browser.newContext();
@@ -219,7 +291,7 @@ describe.skipIf(!findBrowserExecutable())('public post adapter on an offline Chr
       await expect(adapter.reconnect()).resolves.toMatchObject({ id: 'tb.bot' });
       expect(backend.loginOpen('tieba')).toBe(false);
       expect(launched).toHaveBeenCalledTimes(1);
-      expect(launched).toHaveBeenCalledWith('tieba', false);
+      expect(launched).toHaveBeenCalledWith('tieba', false, true);
     } finally { await context.close().catch(() => {}); }
   });
 
@@ -315,6 +387,16 @@ describe.skipIf(!findBrowserExecutable())('public post adapter on an offline Chr
       .rejects.toMatchObject({ kind: 'network', message: expect.stringContaining('HTTP 200，平台代码 -102') });
     expect(writes).toHaveLength(1);
   });
+  it('waits for the visible owner card to become interactive before creating one root comment', async () => {
+    const { adapter, writes } = fixture(false, undefined, false, true, false, false, true);
+    await adapter.send({ oid: work, type: 5, root: '0', parent: '0' }, '喜欢这张。', undefined, account, undefined, owner);
+    expect(writes).toEqual([{ note_id: work, content: '喜欢这张。' }]);
+  });
+  it('opens a collapsed top-level composer whose editor is already visible', async () => {
+    const { adapter, writes } = fixture(false, undefined, false, false, false, false, true, 'compact');
+    await adapter.send({ oid: work, type: 5, root: '0', parent: '0' }, '一级评论', undefined, account);
+    expect(writes).toEqual([{ note_id: work, content: '一级评论' }]);
+  });
   it('creates one independent comment and blocks an unexpected reply target', async () => {
     const root = { oid: work, type: 5, root: '0', parent: '0' };
     const { adapter, writes } = fixture(false, undefined, false, false, false, false, true);
@@ -328,6 +410,13 @@ describe.skipIf(!findBrowserExecutable())('public post adapter on an offline Chr
     expect(wrong.writes).toEqual([]);
   }, 15000);
 
+  it('recovers a verified owner reply after restart without a cached note link', async () => {
+    const { adapter, writes } = fixture(false, undefined, false, true);
+    const target = { oid: work, type: 5, root: comment, parent: comment };
+    await expect(adapter.send(target, '雨停了。', undefined, account, undefined, owner))
+      .resolves.toMatchObject({ receiptId: receipt });
+    expect(writes).toEqual([{ note_id: work, target_comment_id: comment, content: '雨停了。' }]);
+  });
   it('opens only the targeted Xiaohongshu thread and replies to its exact child floor', async () => {
     const child = '6123456789abcdef01234567';
     const body = `<aside><a href="/user/profile/${account}">我的主页</a></aside>
@@ -341,6 +430,9 @@ describe.skipIf(!findBrowserExecutable())('public post adapter on an offline Chr
           </div></div>
         </div>
       </div></div>
+      <script>const thread=document.querySelector('.parent-comment'), more=thread.querySelector('.show-more');
+        thread.remove();more.remove();setTimeout(()=>document.querySelector('.comments-container').append(thread),300);
+        setTimeout(()=>thread.querySelector('.reply-container').prepend(more),700);</script>
       <div id="editor" hidden><textarea id="content-textarea"></textarea><button class="btn submit"
         onclick='fetch("/api/sns/web/v1/comment/post",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({note_id:"${work}",target_comment_id:"${child}",content:document.querySelector("textarea").value})})'>发送</button></div>`;
     const writes: unknown[] = [];

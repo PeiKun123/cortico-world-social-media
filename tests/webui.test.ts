@@ -1,7 +1,7 @@
 import { focusStatus, focusView, type FocusSnapshot } from '../src/webui/focus.ts';
 import { SOCIALMEDIA_DEFAULTS } from '../src/config.ts';
 // @vitest-environment jsdom
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { connectionEvidence, mount, mountSettings } from '../src/webui/client.ts';
 import type { WebUiPanelContext } from 'cortico/web/shared/client-panel.ts';
 async function expandWorks(root: HTMLElement) {
@@ -112,6 +112,50 @@ it('keeps self-only receipts without routine recheck controls', async () => {
   expect(calls).toEqual(['status']);
   controller.abort();
   root.remove();
+});
+
+it('saves overnight activity hours together and preserves the draft during refresh', async () => {
+  const root = document.createElement('div'), controller = new AbortController();
+  const polls: Array<() => void> = [], changes: Array<Record<string, unknown>> = [];
+  const state = { credentialSaved: false, pending: 0, unknown: 0, platforms: [], inbox: [], outbox: [], config: structuredClone(SOCIALMEDIA_DEFAULTS) };
+  mountSettings({
+    root, signal: controller.signal,
+    interval: (fn: () => void) => { polls.push(fn); return { dispose() {} }; },
+    invoke: async (name: string, args: unknown[]) => {
+      if (name === 'settings') { changes.push(args[0] as Record<string, unknown>); return { message: '已保存' }; }
+      return state;
+    },
+  } as unknown as WebUiPanelContext);
+  try {
+    await vi.waitFor(() => expect(root.querySelector('.sm-active-hours')?.textContent).toContain('全天可活动'));
+    const section = root.querySelector<HTMLDetailsElement>('.sm-active-hours')!;
+    section.open = true;
+    section.querySelector<HTMLInputElement>('input[type=checkbox]')!.click();
+    const fields = section.querySelectorAll<HTMLInputElement>('input[type=time]');
+    fields[0].value = '22:00'; fields[1].value = '07:30';
+    fields[1].dispatchEvent(new Event('input'));
+    for (const poll of polls) poll();
+    await Promise.resolve();
+    const tab = root.querySelector<HTMLButtonElement>('.sm-experiments button[data-platform="xiaohongshu"]')!;
+    expect(tab.querySelector('.sm-risk-badge')?.textContent).toBe('易风控');
+    tab.click();
+    const panel = root.querySelector<HTMLElement>('[role="tabpanel"][data-platform="xiaohongshu"]')!;
+    expect(panel.hidden).toBe(false);
+    const activity = panel.querySelector('.sm-activity-settings')!;
+    expect(activity.querySelector('.sm-active-hours')).toBe(section);
+    expect(section.open).toBe(true);
+    expect(activity.querySelector('.sm-platform-roaming summary')?.textContent).toContain('小红书活跃度');
+    expect(root.querySelectorAll('.sm-active-hours')).toHaveLength(1);
+    const risk = panel.querySelector('.sm-posting-risk')!;
+    expect(risk.textContent).toContain('被限制发言');
+    expect(panel.querySelector('input[aria-describedby="' + risk.id + '"]')).not.toBeNull();
+    expect(fields[0].value).toBe('22:00');
+    section.querySelector('button')!.click();
+    await vi.waitFor(() => expect(changes).toEqual([{
+      'worlds.socialmedia.activeHours.enabled': true, 'worlds.socialmedia.activeHours.start': '22:00',
+      'worlds.socialmedia.activeHours.end': '07:30',
+    }]));
+  } finally { controller.abort(); root.remove(); }
 });
 
 it('offers reference presets and preserves unsaved custom limits across refreshes', async () => {
@@ -737,10 +781,8 @@ it('enables Xiaohongshu immediately like Douyin and does not require a separate 
     },
   } as unknown as WebUiPanelContext);
   await new Promise((r) => setTimeout(r, 0));
-  const section = [...root.querySelectorAll('section')].find((s) =>
-    s.querySelector('h3')?.textContent?.startsWith('小红书 ·'),
-  )!;
-  const input = [...section.querySelectorAll<HTMLInputElement>('input[type=checkbox]')].find((i) =>
+  const lab = root.querySelector('.sm-experiments')!;
+  const input = [...lab.querySelectorAll<HTMLInputElement>('input[type=checkbox]')].find((i) =>
     i.parentElement?.textContent?.includes('启用小红书'),
   )!;
   expect(input).toBeDefined();

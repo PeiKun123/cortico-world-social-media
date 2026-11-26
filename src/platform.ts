@@ -71,6 +71,8 @@ export interface InboxItem {
   delivered?: boolean;
   deliveredAt?: string;
   retryAt?: string;
+  /** Earliest single re-offer after a verified pre-submit failure on an owner mention. */
+  ownerRetryAt?: string;
   notificationType?: 'mention' | 'reply' | 'focus-video' | 'focus-comment';
   focusOwnerId?: string;
   handling?: { kind: 'unsafe' | 'resource' | 'limit' | 'skip'; reason: string };
@@ -88,6 +90,7 @@ export interface VisibilityReport {
   platformState?: number;
 }
 export interface SendRecord {
+  unlimitedOwnerNotification?: true;
   resourceUrl?: string;
   mention?: FocusMention;
   ownerAutoReply?: boolean;
@@ -179,6 +182,7 @@ export interface SocialPlatform {
     signal?: AbortSignal,
     expectedAccountId?: string,
     mention?: FocusMention,
+    verifiedWorkOwner?: string,
   ): Promise<string | SendReceipt>;
   findOwnComment?(
     target: CommentTarget,

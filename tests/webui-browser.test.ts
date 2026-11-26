@@ -56,12 +56,12 @@ describe.skipIf(!findBrowserExecutable())('timeline in a real browser', () => {
       if (path === '/webui.js')
         return route.fulfill({
           contentType: 'application/javascript',
-          body: readFileSync(new URL('../dist/webui-surf-idle-clock.js', import.meta.url), 'utf8'),
+          body: readFileSync(new URL('../dist/webui-surf-owner-quota.js', import.meta.url), 'utf8'),
         });
       if (path === '/style.css')
         return route.fulfill({
           contentType: 'text/css',
-          body: readFileSync(new URL('../dist/webui-surf-idle-clock.css', import.meta.url), 'utf8'),
+          body: readFileSync(new URL('../dist/webui-surf-owner-quota.css', import.meta.url), 'utf8'),
         });
       return route.fulfill({
         contentType: 'text/html',
@@ -74,7 +74,7 @@ describe.skipIf(!findBrowserExecutable())('timeline in a real browser', () => {
       });
     });
     await page.goto('http://socialmedia.test/');
-    if (settings) await page.getByRole('heading', { name: '画面设置', exact: true }).waitFor();
+    if (settings) await page.getByRole('button', { name: '画面设置', exact: true }).waitFor();
     else await page.locator('.sm-video').first().waitFor();
     return page;
   }
@@ -108,18 +108,26 @@ describe.skipIf(!findBrowserExecutable())('timeline in a real browser', () => {
       const experiments = page.locator('.sm-experiments');
       const entry = experiments.getByText('实验功能', { exact: true });
       expect(await title.isVisible()).toBe(true);
+      expect(await page.getByRole('button', { name: '实验功能 · 小红书' }).count()).toBe(0);
       expect((await entry.boundingBox())!.y).toBeGreaterThan((await page.locator('.sm-settings').boundingBox())!.y);
       for (const label of ['小红书', '百度贴吧']) {
         const platformTitle = label === '百度贴吧' ? label + '（实验）' : label;
-        await page.getByRole('tab', { name: platformTitle, exact: true }).click();
+        const tabName = label === '小红书' ? '小红书（易风控）' : platformTitle;
+        if (label === '小红书') {
+          await page.locator('.sm-experiments > summary').click();
+          await page.getByRole('button', { name: tabName, exact: true }).click();
+        } else await page.getByRole('tab', { name: tabName, exact: true }).click();
+        await page.getByRole('button', { name: '账号与连接', exact: true }).click();
         const panel = page.getByRole('tabpanel', { name: platformTitle });
-        expect(await panel.getByRole('checkbox', { name: '启用' + platformTitle }).isChecked()).toBe(false);
+        const enable = (label === '小红书' ? experiments : panel).getByRole('checkbox', { name: '启用' + platformTitle });
+        expect(await enable.isChecked()).toBe(false);
         expect(await panel.getByRole('button', { name: '打开' + label + '专用登录窗口' }).isVisible()).toBe(true);
+        await panel.getByRole('button', { name: '画面设置', exact: true }).click();
         await panel.getByText('本站画面设置', { exact: true }).click();
         expect(await panel.getByRole('combobox', { name: '画面档位' }).locator('option').count()).toBe(3);
       }
-      expect(await page.getByRole('tab').count()).toBe(4);
-      await entry.click();
+      expect(await page.getByRole('tab').count()).toBe(3);
+      if (!await experiments.evaluate(node => (node as HTMLDetailsElement).open)) await entry.click();
       await experiments.getByText('表达素材 · 0', { exact: true }).waitFor();
       for (const label of ['人格化练习']) {
         const toggle = experiments.getByRole('checkbox', { name: label, exact: true });
@@ -128,6 +136,7 @@ describe.skipIf(!findBrowserExecutable())('timeline in a real browser', () => {
       }
       expect(await experiments.getByText('开启「开始训练」后消耗较高，建议按需开启。').isVisible()).toBe(true);
       expect(await experiments.getByText(/账号风险提示/).isVisible()).toBe(true);
+      expect(await experiments.locator('label').filter({ hasText: '人格化练习' }).getByText('易风控').isVisible()).toBe(true);
       expect(await experiments.locator('textarea').count()).toBe(0);
       expect(await entry.evaluate(element => getComputedStyle(element).color)).toBe('rgb(244, 173, 114)');
       expect(await page.getByText('刷会儿小电视', { exact: true }).count()).toBe(0);
@@ -433,6 +442,7 @@ describe.skipIf(!findBrowserExecutable())('timeline in a real browser', () => {
   it('keeps resource controls usable on a narrow screen and reports cache cleanup without posting', async () => {
     const page = await fixture(420, true);
     try {
+      await page.getByRole('button', { name: '画面设置', exact: true }).click();
       expect(await page.getByText('高级 · 图片大小、缓存和 FFmpeg', { exact: true }).isVisible()).toBe(true);
       await page.getByText('今天已看 2 / 20 次', { exact: true }).waitFor();
       await page.getByRole('button', { name: /高 · 看仔细/ }).click();
@@ -490,22 +500,33 @@ describe.skipIf(!findBrowserExecutable())('timeline in a real browser', () => {
         })),
       );
       expect(colors.map((n) => n.id)).toEqual(['bilibili', 'douyin', 'xiaohongshu', 'tieba']);
+      for (const platform of ['哔哩哔哩', '抖音', '百度贴吧（实验）']) {
+        await page.getByRole('tab', { name: platform, exact: true }).click();
+        for (const name of ['活跃度', '特别关注', '画面设置', '账号与连接']) {
+          const button = page.getByRole('button', { name, exact: true });
+          await button.click();
+          expect(await button.getAttribute('aria-pressed')).toBe('true');
+          expect(await page.locator('#' + await button.getAttribute('aria-controls')).isVisible()).toBe(true);
+        }
+      }
       expect(new Set(colors.map((n) => n.color)).size).toBe(4);
       const platformTabs = page.getByRole('tab');
       await platformTabs.filter({ has: page.locator('.sm-experimental') })
         .and(page.getByRole('tab', { name: /贴吧（实验）/ })).waitFor();
       expect(await platformTabs.filter({ has: page.locator('.sm-experimental') }).count()).toBe(1);
-      await page.getByRole('tab', { name: '小红书', exact: true }).click();
+      await page.locator('.sm-experiments > summary').click();
+      await page.getByRole('button', { name: '小红书（易风控）', exact: true }).click();
       const focus = page.locator('.sm-platform-card[data-platform="xiaohongshu"] .sm-platform-focus');
       expect(await focus.getAttribute('open')).toBeNull();
-      await focus.locator(':scope > summary').click();
+      await page.getByRole('button', { name: '特别关注', exact: true }).click();
       const input = focus.locator('[aria-label="小红书主人个人主页完整链接"]');
       await input.fill('custom-owner-123');
       await page.evaluate(() => {
         (window as any).refreshers.forEach((fn: () => void) => fn());
       });
       await page.getByRole('tab', { name: '哔哩哔哩', exact: true }).click();
-      await page.getByRole('tab', { name: '小红书', exact: true }).click();
+      await page.getByRole('button', { name: '小红书（易风控）', exact: true }).click();
+      await page.getByRole('button', { name: '特别关注', exact: true }).click();
       expect(await input.inputValue()).toBe('custom-owner-123');
       expect(await focus.getAttribute('open')).not.toBeNull();
       expect(
@@ -671,6 +692,8 @@ describe.skipIf(!findBrowserExecutable())('timeline in a real browser', () => {
     const page = await fixture(420, true);
     try {
       const fold = page.locator('.sm-platform-card[data-platform=bilibili] .sm-platform-focus');
+      await page.getByRole('button', { name: '特别关注', exact: true }).click();
+      await fold.locator(':scope > summary').click();
       const before = await fold.evaluate((n) => getComputedStyle(n).backgroundColor);
       await fold.locator(':scope > summary').click();
       const after = await fold.evaluate((n) => ({

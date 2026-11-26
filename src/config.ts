@@ -130,7 +130,18 @@ export interface FocusConfig {
   maxDailyActions: number;
   maxVideos: number;
 }
+export const DEFAULT_ACTIVE_HOURS = { enabled: false, start: '09:00', end: '23:00' };
+export const clockTime = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
+export function withinActiveHours(hours: typeof DEFAULT_ACTIVE_HOURS | undefined, timezone?: string, now = new Date()) {
+  if (!hours?.enabled || hours.start === hours.end) return true;
+  const time = new Intl.DateTimeFormat('en-GB', {
+    timeZone: timezone, hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+  }).format(now);
+  return hours.start < hours.end ? time >= hours.start && time < hours.end : time >= hours.start || time < hours.end;
+}
+
 export interface SocialMediaConfigSection {
+  activeHours?: typeof DEFAULT_ACTIVE_HOURS;
   focus: FocusConfig;
   enabled: boolean;
   roaming: RoamingConfig;
@@ -170,6 +181,7 @@ export const SOCIALMEDIA_DEFAULTS: SocialMediaConfigSection = {
     replyExistingComments: false,
     autoReplyIntervalMinutes: 2,
   },
+  activeHours: { ...DEFAULT_ACTIVE_HOURS },
   roaming: { enabled: false, ...ROAMING_PRESETS.active },
   experiments: { corpus: false, practice: false, training: false, tieba: false, xiaohongshu: false },
   platforms: {
@@ -248,7 +260,7 @@ export const SOCIALMEDIA_CONFIG_GROUP: ConfigGroup = {
     title: '小鲸鱼爱冲浪',
     properties: {
       'worlds.socialmedia.experiments.corpus': { type: 'boolean', title: '语料学习' },
-      'worlds.socialmedia.experiments.practice': { type: 'boolean', title: '人格化练习', description: '实验性 Gemini 网页陪练。开启持续训练后消耗较高。' },
+      'worlds.socialmedia.experiments.practice': { type: 'boolean', title: '人格化练习', description: 'Gemini 网页陪练易风控，连续访问可能触发验证或限流。' },
       'worlds.socialmedia.experiments.training': { type: 'boolean', title: '开始训练', description: '高消耗。空闲时持续发问、追问与复盘，消耗小K的模型用量及 Gemini 网页额度。建议短时开启。' },
       ...(PUBLIC_POST_TRIAL_ENABLED ? {
         'worlds.socialmedia.experiments.tieba': { type: 'boolean', title: '百度贴吧公开帖' },
@@ -303,8 +315,8 @@ export const SOCIALMEDIA_CONFIG_GROUP: ConfigGroup = {
         ]),
       ),
       'worlds.socialmedia.focus.outsideReplyLimit': {
-        type: 'integer', title: '主人在其他作品下的每日通知回复上限', minimum: 5, maximum: 100,
-        description: 'B站按已绑定的主人账号计数，默认5条。仍受普通发布与通知总额度限制。', 'x-hot': true,
+        type: 'integer', title: '主人在其他作品下的每日通知回复上限', minimum: -1, maximum: 100,
+        description: '默认 5 次。0 关闭这类回复，1–100 同时受普通发布和通知总额度限制。-1 让绑定主人独立计数，回复次数不限。', 'x-hot': true,
       },
       'worlds.socialmedia.focus.autoReplyNewComments': {
         type: 'boolean',
@@ -364,6 +376,9 @@ export const SOCIALMEDIA_CONFIG_GROUP: ConfigGroup = {
         description: '只检查这个范围，未显示的历史作品不代表已经参与。',
         'x-hot': true,
       },
+      'worlds.socialmedia.activeHours.enabled': { type: 'boolean', title: '限制自动社交的活跃时段', 'x-hot': true },
+      'worlds.socialmedia.activeHours.start': { type: 'string', title: '活跃开始时间', 'x-hot': true },
+      'worlds.socialmedia.activeHours.end': { type: 'string', title: '活跃结束时间', 'x-hot': true },
       'worlds.socialmedia.roaming.enabled': {
         type: 'boolean',
         title: '允许闲时自主看视频',

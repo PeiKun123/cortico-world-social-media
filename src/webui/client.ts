@@ -12,6 +12,7 @@ import {
   type InteractionFilter,
 } from '../interactions.ts';
 import {
+  DEFAULT_ACTIVE_HOURS,
   ROAMING_PLATFORMS,
   ROAMING_PRESETS,
   roamingConfig,
@@ -25,6 +26,7 @@ import type { WebUiPanelContext } from 'cortico/web/shared/client-panel.ts';
 import type { InboxItem, SendRecord, PublicVideo, PublicComment } from '../platform.ts';
 import './style.css';
 interface Snapshot {
+  activeHours?: { open: boolean; timezone: string };
   recordsRevision?: string;
   dynamics?: {
     enabled: boolean;
@@ -364,7 +366,7 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
       id === 'xiaohongshu' ? '小红书' : '百度贴吧 · 实验',
       [
         ['可用', '登录绑定后可自动刷帖、浏览主人作品，以及读取官网可见的正文和评论。'],
-        ['边界', '部分作品或功能会受登录、验证和官网页面影响。评论回复需单独授权。'],
+        ['边界', id === 'xiaohongshu' ? '易风控：已有用户反馈账号被限制发言。公开评论和回复可能受限，可只开启浏览。' : '部分作品或功能会受登录、验证和官网页面影响。评论回复需单独授权。'],
       ],
     ] as const),
   ] as const) {
@@ -530,16 +532,53 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
   const roamSummary = el('p', '', 'sm-muted');
   roamSummary.setAttribute('aria-live', 'polite');
   const roamPlatformStates = el('div', undefined, 'sm-roaming-states');
+  const roundCounts = fold('各平台今日轮次');
+  roundCounts.append(roamPlatformStates);
   roamSection.append(
     el('h3', '闲逛总开关'),
     roamingEnabled.parentElement!,
     roamSummary,
-    roamPlatformStates,
-    el(
-      'small',
-      '总开关控制是否发起闲逛；活跃度和等待时间只在各平台设置。新消息到来时收好当前一步，再回归聊天。',
-    ),
+    roundCounts,
   );
+  const hoursBox = fold('全平台活跃时段', 'sm-subsection sm-active-hours');
+  const hoursBadge = el('span', '', 'sm-fold-status');
+  hoursBox.querySelector('summary')!.append(hoursBadge);
+  const hoursLabel = el('label', undefined, 'sm-toggle');
+  const hoursOn = el('input');
+  hoursOn.type = 'checkbox';
+  hoursLabel.append(hoursOn, document.createTextNode('限制自动社交时段'));
+  const hoursStatus = el('p', '', 'sm-muted');
+  const hoursFields = el('div', undefined, 'sm-hours-fields');
+  function clockInput(label: string) {
+    const field = el('label', label);
+    const input = el('input');
+    input.type = 'time';
+    field.append(input);
+    hoursFields.append(field);
+    return input;
+  }
+  const startTime = clockInput('开始');
+  const endTime = clockInput('结束');
+  const hoursSave = button('保存时段', async () => {
+    if (!startTime.value || !endTime.value) throw Error('请填写开始和结束时间。');
+    await saveConfig('world:socialmedia', {
+      'worlds.socialmedia.activeHours.enabled': hoursOn.checked,
+      'worlds.socialmedia.activeHours.start': startTime.value,
+      'worlds.socialmedia.activeHours.end': endTime.value,
+    });
+    hoursDirty = false;
+    await refresh();
+  }, hoursBox);
+  let hoursDirty = false;
+  function hoursEdited() {
+    hoursDirty = true;
+    hoursSave.disabled = false;
+    hoursFields.hidden = !hoursOn.checked;
+  }
+  hoursOn.addEventListener('change', hoursEdited, { signal: ctx.signal });
+  for (const input of [startTime, endTime]) input.addEventListener('input', hoursEdited, { signal: ctx.signal });
+  hoursSave.before(hoursLabel, hoursStatus, hoursFields);
+  hoursBox.append(el('small', '支持跨午夜，起止相同表示全天。休息时保留评论待办，暂停新的闲逛、群聊通知和主动动态。'));
   function browserPlatform(id: 'douyin', title: string, description: string) {
     const section = el('section', undefined, 'sm-config-section sm-platform-card');
     section.dataset.platform = id;
@@ -853,7 +892,7 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
     });
   }
   const visualHeading = el('div', undefined, 'sm-visual-heading');
-  visualHeading.append(el('h3', '画面设置'), visualToggle);
+  visualHeading.append(el('h3', '全平台画面默认值'), visualToggle);
   resourceSection.append(
     visualHeading,
     el('p', '按视频时长取帧，短片会少取。图片会增加模型输入，抽帧也占用本机资源。只回评论时可先读文字。', 'sm-muted'),
@@ -1031,7 +1070,7 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
     ['douyin', '抖音'],
     ...POST_PLATFORMS.map(id => [id, PUBLIC_POST_NAMES[id]] as const),
   ] as const) {
-    const card = fold('闲逛与活跃度', 'sm-subsection sm-platform-roaming'),
+    const card = fold(title + '活跃度', 'sm-subsection sm-platform-roaming'),
       status = el('p', '', 'sm-muted');
     const choices = el('div', undefined, 'sm-presets sm-presets-compact');
     for (const [key, label] of [
@@ -1074,7 +1113,7 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
       status,
       el(
         'p',
-        '总开关开启后，此平台独立使用自己的等待与额度。放养仅放开阅读，发评上限保持不变。',
+        '选择后立即生效，仅调整本平台。',
         'sm-muted',
       ),
       choices,
@@ -1190,7 +1229,7 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
     'worlds.socialmedia.platforms.douyin.focus.maxDailyActions',
   ]);
   for (const [path, prop] of Object.entries(SOCIALMEDIA_CONFIG_GROUP.schema.properties)) {
-    if (path.startsWith('worlds.socialmedia.roaming.') || path.startsWith('worlds.socialmedia.experiments.') || excluded.has(path)) continue;
+    if (path.startsWith('worlds.socialmedia.activeHours.') || path.startsWith('worlds.socialmedia.roaming.') || path.startsWith('worlds.socialmedia.experiments.') || excluded.has(path)) continue;
     const roamPath = path.match(
       /^worlds\.socialmedia\.platforms\.(bilibili|douyin|tieba|xiaohongshu)\.roaming\.(.+)$/,
     );
@@ -1242,10 +1281,10 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
                           : advanced;
     const label = el('label', undefined, 'sm-config-field');
     const copy = el('span');
-    copy.append(el('strong', ownerQuota ? '每天最多回复主人几次' : replyTotal ? '每天最多回复所有人的通知（含主人）' : prop.title));
+    copy.append(el('strong', ownerQuota ? '每天最多回复主人几次' : replyTotal ? '普通通知每日总额度' : prop.title));
     if (prop.description) copy.append(el('small', prop.description));
     if (prop.type === 'integer' && prop.minimum !== undefined && prop.maximum !== undefined)
-      copy.append(el('small', '可填 ' + prop.minimum + '–' + prop.maximum));
+      copy.append(el('small', ownerQuota ? '可填 0–100，或 -1 表示不限次数' : '可填 ' + prop.minimum + '–' + prop.maximum));
     let input: HTMLInputElement | HTMLSelectElement;
     if (prop.enum) {
       const select = el('select');
@@ -1479,6 +1518,67 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
     ['douyin', '抖音', douyinSection],
     ...(experiments?.publicPanels ?? []),
   ] as const;
+  const activityGroups = new Map<string, HTMLElement>();
+  for (const [id] of platformPanels) {
+    const platformActivity = roamCards.get(id)!;
+    const group = el('section', undefined, 'sm-activity-settings');
+    platformActivity.before(group);
+    group.append(el('h3', '活跃安排'), platformActivity);
+    activityGroups.set(id, group);
+  }
+  const visualPanes = new Map<string, HTMLElement>();
+  const showCategory = new Map<string, (key: string) => void>();
+  for (const [id, , panel] of platformPanels) {
+    const heading = panel.querySelector('h3')!;
+    const save = panel.querySelector('.sm-platform-savebar')!;
+    const activity = activityGroups.get(id)!;
+    const focus = panel.querySelector<HTMLDetailsElement>('.sm-platform-focus')!;
+    const localVisual = visualCards.get(id)!;
+    const connection = el('div');
+    const navigation = el('div', undefined, 'sm-setting-choices');
+    navigation.setAttribute('role', 'group');
+    navigation.setAttribute('aria-label', '常用设置');
+    const visual = el('div');
+    visual.append(localVisual);
+    visualPanes.set(id, visual);
+    for (const node of [...panel.children]) {
+      if (node !== heading && node !== save && node !== activity && node !== focus) connection.append(node);
+    }
+    const focusPane = el('div');
+    focusPane.append(focus);
+    if (id === 'bilibili') focusPane.append(ownerReplySection);
+    const groups = [
+      ['account', '账号与连接', '登录、权限与通知', connection],
+      ['activity', '活跃度', '频率、时段与闲逛', activity],
+      ['focus', '特别关注', '主人账号与回评', focusPane],
+      ['visual', '画面设置', '本站画面与全局预算', visual],
+    ] as const;
+    const controls = new Map<string, HTMLButtonElement>();
+    const choose = (key: string) => {
+      for (const [name,,, pane] of groups) {
+        pane.hidden = name !== key;
+        controls.get(name)!.setAttribute('aria-pressed', String(name === key));
+      }
+      ctx.memo?.set('settings-category', key);
+    };
+    for (const [key, label, description, pane] of groups) {
+      const choice = el('button');
+      choice.type = 'button';
+      choice.append(el('strong', label), el('small', description));
+      choice.setAttribute('aria-label', label);
+      pane.id = (settingsMode ? 'sm-' : 'sm-detached-') + id + '-' + key;
+      choice.setAttribute('aria-controls', pane.id);
+      choice.addEventListener('click', () => {
+        choose(key);
+        if (key === 'focus') focus.open = true;
+        if (key === 'activity') roamCards.get(id)!.open = true;
+      }, { signal: ctx.signal });
+      controls.set(key, choice);
+      navigation.append(choice);
+    }
+    showCategory.set(id, choose);
+    panel.append(navigation, ...groups.map(([, , , pane]) => pane), save);
+  }
   const platformButtons = new Map<string, HTMLButtonElement>();
   const prefix = settingsMode ? 'sm-settings' : 'sm-detached';
   function selectPlatform(id: string) {
@@ -1486,9 +1586,14 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
       const selected = key === id,
         tab = platformButtons.get(key)!;
       panel.hidden = !selected;
-      tab.setAttribute('aria-selected', String(selected));
-      tab.tabIndex = selected ? 0 : -1;
+      tab.setAttribute(key === 'xiaohongshu' ? 'aria-pressed' : 'aria-selected', String(selected));
+      tab.tabIndex = selected || (id === 'xiaohongshu' && key === 'bilibili') || key === 'xiaohongshu' ? 0 : -1;
     }
+    // Move the shared controls, including any unsaved time edit, with the selected platform.
+    activityGroups.get(id)!.insertBefore(roamSection, roamCards.get(id)!);
+    activityGroups.get(id)!.insertBefore(hoursBox, roamCards.get(id)!);
+    visualPanes.get(id)!.append(resourceSection);
+    showCategory.get(id)!(ctx.memo?.get<string>('settings-category', 'account') ?? 'account');
     ctx.memo?.set('settings-platform', id);
   }
   for (const [id, title, panel] of platformPanels) {
@@ -1497,21 +1602,26 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
     const name = el('strong', title);
     const experimental = id === 'tieba';
     if (experimental) name.append(el('span', '实验', 'sm-experimental'));
+    if (id === 'xiaohongshu') name.append(el('span', '易风控', 'sm-risk-badge'));
     tab.append(name, badge);
-    tab.setAttribute('aria-label', experimental ? title + '（实验）' : title);
+    tab.setAttribute('aria-label', experimental ? title + '（实验）' : id === 'xiaohongshu' ? title + '（易风控）' : title);
     tab.type = 'button';
     tab.dataset.platform = id;
     tab.id = prefix + '-tab-' + id;
-    tab.setAttribute('role', 'tab');
+    if (id !== 'xiaohongshu') tab.setAttribute('role', 'tab');
     tab.setAttribute('aria-controls', prefix + '-panel-' + id);
     panel.id = prefix + '-panel-' + id;
     panel.setAttribute('role', 'tabpanel');
     panel.setAttribute('aria-labelledby', tab.id);
-    tab.addEventListener('click', () => selectPlatform(id), { signal: ctx.signal });
+    tab.addEventListener('click', () => {
+      selectPlatform(id);
+      if (id === 'xiaohongshu') panel.focus();
+    }, { signal: ctx.signal });
     tab.addEventListener(
       'keydown',
       (event) => {
-        const keys = platformPanels.map(([key]) => key),
+        if (id === 'xiaohongshu') return;
+        const keys = platformPanels.map(([key]) => key).filter(key => key !== 'xiaohongshu'),
           index = keys.indexOf(id);
         const next =
           event.key === 'ArrowRight'
@@ -1531,25 +1641,21 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
       { signal: ctx.signal },
     );
     platformButtons.set(id, tab);
-    platformTabs.append(tab);
+    if (id === 'xiaohongshu' && experiments) {
+      const lab = el('div', undefined, 'sm-lab-platform');
+      const enable = panel.querySelector<HTMLElement>('.sm-lab-enable')!;
+      lab.append(enable, tab, el('small', '每次启动默认关闭。只看笔记时可关闭公开发言。'));
+      experiments.element.querySelector('.sm-experiment-body')!.prepend(lab);
+    } else platformTabs.append(tab);
   }
   const remembered = ctx.memo?.get<string>('settings-platform', 'bilibili');
   selectPlatform(platformButtons.has(remembered ?? '') ? remembered! : 'bilibili');
   const layoutLinks = el('div', undefined, 'sm-layout-links');
-  const jumpVisual = el('button', '画面设置 ↓');
-  jumpVisual.type = 'button';
-  resourceSection.tabIndex = -1;
-  jumpVisual.addEventListener('click', () => {
-    resourceSection.focus({ preventScroll: true });
-    resourceSection.scrollIntoView({ block: 'start' });
-  }, { signal: ctx.signal });
-  layoutLinks.append(el('h3', '平台'), jumpVisual);
+  layoutLinks.append(el('h3', '平台'));
   const platformColumn = el('div', undefined, 'sm-primary');
   platformColumn.append(layoutLinks, platformTabs, ...platformPanels.map(([, , panel]) => panel));
-  const settingsRail = el('aside', undefined, 'sm-rail');
-  settingsRail.append(roamSection, resourceSection);
-  settings.append(platformColumn, settingsRail);
-  ctx.guardLeave?.(() => (dirtyExtras.size ? '还有未保存的设置，离开将放弃这些修改。' : null));
+  settings.append(platformColumn);
+  ctx.guardLeave?.(() => (dirtyExtras.size || hoursDirty ? '还有未保存的设置，离开将放弃这些修改。' : null));
   const overview = el('div', undefined, 'sm-overview');
   const metrics = new Map<string, HTMLElement>();
   for (const label of ['待回应', '已发出', '今日闲逛']) {
@@ -1882,7 +1988,7 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
   dynamicRecords.append(dynamicBody);
   root.append(header, alert);
   if (settingsMode) {
-    settingsRail.append(capabilities);
+    platformColumn.append(capabilities);
     root.append(feedback, settings, experiments!.element);
   } else {
     const layout = el('div', undefined, 'sm-record-layout');
@@ -2331,7 +2437,7 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
         alert.hidden = false;
       }
     } finally {
-      if (b) b.disabled = false;
+      if (b) b.disabled = b === hoursSave && !hoursDirty;
     }
   }
   function render(state: Snapshot) {
@@ -2482,6 +2588,18 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
         );
       }
     }
+    const hours = { ...DEFAULT_ACTIVE_HOURS, ...state.config?.activeHours };
+    if (!hoursDirty) {
+      hoursOn.checked = hours.enabled;
+      startTime.value = hours.start;
+      endTime.value = hours.end;
+      hoursFields.hidden = !hours.enabled;
+      hoursSave.disabled = true;
+    }
+    hoursBadge.textContent = hours.enabled && hours.start !== hours.end ? hours.start + '–' + hours.end : '全天';
+    hoursStatus.textContent = (hours.enabled && hours.start !== hours.end
+      ? (state.activeHours?.open === false ? '休息中' : '活跃时段') + ' · ' + hours.start + '–' + hours.end
+      : '全天可活动') + (state.activeHours?.timezone ? ' · ' + state.activeHours.timezone : '');
     roamingEnabled.checked = r?.enabled ?? false;
     roamSummary.textContent = !r
       ? '正在读取闲逛状态…'

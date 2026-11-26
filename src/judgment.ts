@@ -11,7 +11,7 @@ export function judgeParticipation(
   draft: string,
   choice?: { mode?: string; evidence?: string },
 ): ParticipationJudgment {
-  const topic = /游戏|模拟|虚拟|开发日志|沙盒/.test(title)
+  const topic = /游戏|模拟|虚拟|开发日志|沙盒|#我的世界(?:版|[\s#]|$)|\bminecraft\b/i.test(title)
     ? 'simulation'
     : /养护|照度|养苔藓|养鱼|种植|施肥|治病|用药|诊疗|维修|投资|理财|养殖|饲养/.test(title)
       ? 'practical'
@@ -45,7 +45,7 @@ export function judgeParticipation(
       : mode === 'skip'
         ? '本条不参与，保留阅读记录即可。'
         : mode === 'observe'
-          ? '涉及现实实操且没有明确的公共交流切入点，优先观察学习；不用为满足发言额度插话。'
+          ? (choice?.mode === 'observe' ? '准备草稿时选择了只观察，本条暂不发言。' : '涉及现实实操且没有明确的公共交流切入点，优先观察学习；不用为满足发言额度插话。')
           : '可以围绕已确认的内容自然交流；明确区分事实、经验、猜测与玩笑，高赞不作为真实性证明。',
   };
 }

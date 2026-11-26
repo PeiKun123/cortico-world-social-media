@@ -1,5 +1,10 @@
 import { expect, it } from 'vitest';
 import { settingsPatch } from '../src/settings.ts';
+it('accepts only explicit integer owner notification quotas', () => {
+  const key = 'worlds.socialmedia.focus.outsideReplyLimit';
+  for (const n of [-1, 0, 1, 100]) expect(settingsPatch({ [key]: n }).focus?.outsideReplyLimit).toBe(n);
+  for (const n of [-2, -1.5, 1.5, 101]) expect(() => settingsPatch({ [key]: n })).toThrow();
+});
 it('only persists validated local World settings', () => {
   expect(settingsPatch({ 'worlds.socialmedia.roaming.maxDailyComments': 60 })).toEqual({
     roaming: { maxDailyComments: 60 },

@@ -11,6 +11,15 @@ it('does not turn a simulated moss tank or the owner experience into real-life c
     expect(judgeParticipation('苔藓养护与照度', text).needsRevision, text).toBe(true);
   expect(judgeParticipation('苔藓养护与照度', '我觉得这段微距镜头很漂亮').mode).toBe('discuss');
 });
+it('recognizes Minecraft comic tags even when the joke mentions treating an illness', () => {
+  for (const tag of ['#我的世界', '#Minecraft']) {
+    expect(judgeParticipation('瓶装水真的能治病吗？ ' + tag, '末影人送水只管送不管装，太贴切了。'))
+      .toMatchObject({ topic: 'simulation', mode: 'discuss' });
+    expect(judgeParticipation(tag, '我试过这个药，亲测有效').needsRevision).toBe(true);
+  }
+  expect(judgeParticipation('瓶装水真的能治病吗？', '想交流经验').mode).toBe('observe');
+});
+
 it('keeps interests readable and permits clearly virtual discussion in simulation topics', () => {
   expect(judgeParticipation('如何正确养苔藓', '想跟大家交流养护经验').mode).toBe('observe');
   expect(

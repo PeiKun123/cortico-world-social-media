@@ -2,7 +2,7 @@ import { POST_PLATFORMS, profileId } from './public-post-policy.ts';
 import { parseGroupList } from './group-policy.ts';
 import { parseFocusAccount } from './focus.ts';
 import { coerceGroupValues, setByPath } from 'cortico/core/config-schema.ts';
-import { SOCIALMEDIA_CONFIG_GROUP, type SocialMediaConfigSection } from './config.ts';
+import { clockTime, SOCIALMEDIA_CONFIG_GROUP, type SocialMediaConfigSection } from './config.ts';
 export function settingsPatch(input: unknown): Partial<SocialMediaConfigSection> {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw Error('设置格式无效');
   const raw = { ...input } as Record<string, unknown>,
@@ -10,6 +10,10 @@ export function settingsPatch(input: unknown): Partial<SocialMediaConfigSection>
   for (const [key, value] of Object.entries(raw)) {
     if (!Object.hasOwn(props, key)) throw Error('不允许修改此设置：' + key);
     const p = props[key];
+    if (key === 'worlds.socialmedia.focus.outsideReplyLimit' && !Number.isInteger(value))
+      throw Error('主人通知回复额度须为 0–100 的整数，或 -1 表示不限次数。');
+    if (['worlds.socialmedia.activeHours.start', 'worlds.socialmedia.activeHours.end'].includes(key) &&
+        (typeof value !== 'string' || !clockTime.test(value))) throw Error('活跃时段请输入 24 小时制的 HH:mm');
     if (
       (p.type === 'boolean' && typeof value !== 'boolean') ||
       (p.type === 'string' && (typeof value !== 'string' || value.length > 2000))

@@ -575,7 +575,7 @@ export class SocialStore {
     patch: Partial<
       Pick<
         InboxItem,
-        'status' | 'delivered' | 'deliveredAt' | 'retryAt' | 'handling' | 'ownerAutoReply'
+        'status' | 'delivered' | 'deliveredAt' | 'retryAt' | 'ownerRetryAt' | 'handling' | 'ownerAutoReply'
       >
     >,
   ) {

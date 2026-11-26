@@ -5,9 +5,40 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { SocialMediaWorld } from '../src/world.ts';
-import { SOCIALMEDIA_DEFAULTS } from '../src/config.ts';
+import { SOCIALMEDIA_DEFAULTS, withinActiveHours } from '../src/config.ts';
 import type { WorldContext } from 'cortico/world.ts';
 import type { WorldHost } from 'cortico/core/types.ts';
+it('evaluates the local half-open activity window, overnight and on legacy installs', () => {
+  const at = new Date('2026-11-25T16:00:00Z'); // midnight in Shanghai
+  const window = (start: string, end: string) => ({ enabled: true, start, end });
+  expect(withinActiveHours(undefined, 'Asia/Shanghai', at)).toBe(true);
+  expect(withinActiveHours(window('22:00','02:00'), 'Asia/Shanghai', at)).toBe(true);
+  expect(withinActiveHours(window('09:00','23:00'), 'Asia/Shanghai', at)).toBe(false);
+  expect(withinActiveHours(window('00:00','09:00'), 'Asia/Shanghai', at)).toBe(true);
+  expect(withinActiveHours(window('22:00','00:00'), 'Asia/Shanghai', at)).toBe(false);
+  expect(withinActiveHours(window('00:00','00:00'), 'Asia/Shanghai', at)).toBe(true);
+});
+it('holds automatic offers and inbox deliveries during rest without reserving a round or publishing', async () => {
+  const x = setup(), world = x.world as any;
+  vi.useFakeTimers({ toFake: ['Date'] });
+  try {
+    vi.setSystemTime(new Date('2026-11-26T01:00:00Z'));
+    x.cfg.activeHours = { enabled: true, start: '09:00', end: '23:00' };
+    x.cfg.roaming.enabled = true;
+    world.host = { store: { range: () => [] }, pushEvent: vi.fn() };
+    const offer = vi.spyOn(world.service.roaming, 'offer');
+    const deliver = vi.spyOn(world.service, 'deliver').mockResolvedValue(undefined);
+    await world.maybeOfferRoam();
+    await world.deliverInbox(true);
+    expect(offer).not.toHaveBeenCalled();
+    expect(deliver).not.toHaveBeenCalled();
+    for (const [name, action] of [['socialmedia_publish',''],['socialmedia_groupchat','send'],['socialmedia_dynamic','publish']])
+      await expect(world.run(name, { action }, new AbortController().signal)).rejects.toThrow('休息时段');
+    vi.setSystemTime(new Date('2026-11-26T09:00:00Z'));
+    await world.deliverInbox(true);
+    expect(deliver).toHaveBeenCalledOnce();
+  } finally { vi.useRealTimers(); await x.world.stop(); }
+});
 const dirs: string[] = [];
 afterEach(() => {
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
@@ -39,6 +70,30 @@ function setup() {
   return { world, ctx, cfg, requests: () => requests };
 }
 describe('Cortico integration', () => {
+  it('disarms experimental platforms and practice before the first poll on every World start', async () => {
+    const { world, cfg, ctx } = setup();
+    cfg.platforms.xiaohongshu.enabled = true;
+    cfg.platforms.tieba.enabled = true;
+    cfg.experiments = { practice: true, training: true };
+    const changed: unknown[] = [];
+    ctx.persist = patch => {
+      changed.push(patch);
+      for (const id of ['xiaohongshu', 'tieba'])
+        if (patch.platforms?.[id]?.enabled === false) cfg.platforms[id].enabled = false;
+      Object.assign(cfg.experiments!, patch.experiments);
+    };
+    const host = { store: { range: () => [] }, pushEvent: async () => ({ cursor: 1 }) } as unknown as WorldHost;
+    try {
+      await world.start(host);
+      expect(changed[0]).toEqual({ platforms: { xiaohongshu: { enabled: false }, tieba: { enabled: false } },
+        experiments: { practice: false, training: false } });
+      await expect(world.webUi().invoke!('settings', 'expressionPublicFeedCheck', ['xiaohongshu'])).rejects.toThrow('已关闭');
+      await world.stop();
+      cfg.platforms.tieba.enabled = true;
+      await world.start(host);
+      expect(changed[1]).toEqual({ platforms: { tieba: { enabled: false } } });
+    } finally { await world.stop(); }
+  });
   it('sends records once per revision and keeps setting reads small', async () => {
     const { world, ctx } = setup();
     const ui = world.webUi();
@@ -1188,7 +1243,9 @@ it('checks owner comments while ordinary sync waits and delivers each ready plat
       if (platform === 'bilibili') await slow;
     });
     const deliver = vi.spyOn(world, 'deliverInbox').mockResolvedValue(undefined);
+    x.cfg.platforms.xiaohongshu.enabled = false;
     await world.start({} as WorldHost);
+    x.cfg.platforms.xiaohongshu.enabled = true; // Operator enables the experiment for this run.
     await vi.advanceTimersByTimeAsync(15000);
     expect(poll.mock.calls.map(args => args[0])).toEqual(['bilibili', 'douyin', 'xiaohongshu']);
     expect(deliver).toHaveBeenCalledWith(true);
@@ -1380,6 +1437,21 @@ it('does not restart group quiet time after internal work while still respecting
     await x.world.stop();
     vi.useRealTimers();
   }
+});
+
+it('finishes a search challenge by checking that search even when the feed cannot advance', async () => {
+  const x = setup();
+  x.cfg.platforms.douyin.enabled = true;
+  const dy = (x.world as any).douyin;
+  vi.spyOn(dy, 'closeLogin').mockResolvedValue(undefined);
+  vi.spyOn((x.world as any).service, 'connect').mockResolvedValue({ id: '42', name: '测试' });
+  vi.spyOn(dy, 'checkPendingVideoSearch').mockResolvedValue(true);
+  const feed = vi.spyOn(dy, 'nextVideo').mockRejectedValue(new Error('无法翻页'));
+  try {
+    const result = await x.world.webUi().invoke!('settings', 'douyinFinishLogin', []);
+    expect(result).toMatchObject({ backgroundReady: true, detail: expect.stringContaining('原搜索页') });
+    expect(feed).not.toHaveBeenCalled();
+  } finally { await x.world.stop(); }
 });
 
 it('checks the configured background feed after local login completion and does not claim a failed check succeeded', async () => {

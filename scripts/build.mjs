@@ -9,7 +9,7 @@ await build({
   bundle: true,
   format: 'esm',
   target: 'es2022',
-  outfile: 'dist/webui-surf-idle-clock.js',
+  outfile: 'dist/webui-surf-owner-quota.js',
   minify: true,
   legalComments: 'none',
 });
@@ -18,7 +18,7 @@ await build({
   entryPoints: ['src/webui/style.css'],
   bundle: true,
   minify: true,
-  outfile: 'dist/webui-surf-idle-clock.css',
+  outfile: 'dist/webui-surf-owner-quota.css',
   legalComments: 'none',
 });
 

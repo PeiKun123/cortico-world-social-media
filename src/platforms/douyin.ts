@@ -171,6 +171,7 @@ function edgeExecutable(configured: string) {
 interface Capture {
   creators: Map<string, Account & { handle: string }>;
   videos: Map<string, Video>;
+  searchEvidence?: { query: string; ids: Set<string> };
   galleryUrls: Map<string, Array<string | null>>;
   commentPictures: Map<string, string[]>;
   rows: PublicComment[];
@@ -317,7 +318,7 @@ export class DouyinPlatform implements SocialPlatform {
   }
   // Only explicit local checks or a changed browser mode resume after a challenge.
   resumeVerificationChecks() {
-    if (this.verification) this.verification.paused = false;
+    if (this.verification) this.verification = { ...this.verification, paused: false };
   }
   private verificationUrl(input?: string) {
     try {
@@ -536,6 +537,11 @@ export class DouyinPlatform implements SocialPlatform {
       try {
         const v = mapDouyinVideo(rawVideo);
         data.videos.set(v.id, v);
+        const query = url.searchParams.get('keyword');
+        if (query && url.pathname.includes('/search/')) {
+          if (data.searchEvidence?.query !== query) data.searchEvidence = { query, ids: new Set() };
+          data.searchEvidence.ids.add(v.id);
+        }
         if (v.kind === 'images') data.galleryUrls.set(v.id, douyinImageUrls(rawVideo));
       } catch {
         /* Unrecognized records have no usable target. */
@@ -665,7 +671,9 @@ export class DouyinPlatform implements SocialPlatform {
           this.pageData.set(p, data);
         }
         this.operationStage = '打开网页';
-        if (p.url() !== url || url === ORIGIN + '/user/self') {
+        const recheckingOriginal = kind === 'main' && this.verificationReturnUrl === this.verificationUrl(url);
+        if (p.url() !== url || url === ORIGIN + '/user/self' || recheckingOriginal) {
+          data.searchEvidence = undefined;
           data.creators.clear();
           data.videos.clear();
           data.galleryUrls.clear();
@@ -895,6 +903,13 @@ export class DouyinPlatform implements SocialPlatform {
       signal,
     );
   }
+  async checkPendingVideoSearch(signal?: AbortSignal) {
+    const url = this.verificationReturnUrl && new URL(this.verificationReturnUrl);
+    if (!url || !url.pathname.startsWith('/search/') || url.searchParams.get('type') !== 'video') return false;
+    await this.search(decodeURIComponent(url.pathname.slice('/search/'.length)), 1, signal);
+    return true;
+  }
+
   async search(query: string, page = 1, signal?: AbortSignal) {
     if (!query.trim() || query.length > 120) throw new PlatformError('检索词应为1–120字。');
     if (page !== 1) throw new PlatformError('抖音搜索目前支持读取首屏。');
@@ -902,8 +917,14 @@ export class DouyinPlatform implements SocialPlatform {
       ORIGIN + '/search/' + encodeURIComponent(query) + '?type=video',
       async (p, data) => {
         await this.dismiss(p);
-        await this.settle(p, data, () => data.videos.size > 0);
-        const items = [...data.videos.values()].slice(0, 10);
+        const checking = this.verificationReturnUrl === ORIGIN + '/search/' + encodeURIComponent(query) + '?type=video';
+        const found = () => data.searchEvidence?.query === query && data.searchEvidence.ids.size > 0;
+        await this.settle(p, data, () => checking ? found() : data.videos.size > 0);
+        if (checking && !found()) {
+          await this.checkPageBlock(p);
+          throw new PlatformError('原搜索页尚未读到这个关键词的视频结果，保留原验证记录。', 'network');
+        }
+        const items = [...data.videos.values()].filter(v => !checking || data.searchEvidence?.ids.has(v.id)).slice(0, 10);
         this.detail = items.length
           ? '已读取抖音搜索结果。'
           : '搜索结果未提供可核实的视频编号；可能需要登录或完成网页验证。';

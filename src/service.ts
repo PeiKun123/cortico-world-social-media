@@ -29,6 +29,7 @@ export interface PublishInput {
   target?: CommentTarget;
   text: string;
   retryRejected?: boolean;
+  retryOf?: string;
   roamId?: string;
   mentionFocus?: boolean;
   preparation?: import('./platform.ts').PreparationNote;
@@ -65,6 +66,14 @@ export class SocialService {
     this.focus = new OwnerFocus(cfg, store);
     this.douyinFocus = new OwnerFocus(cfg, store, 'douyin');
     for (const id of adapters.keys()) this.states.set(id, { id });
+    for (const item of store.inbox()) {
+      if (item.platform !== 'bilibili' || item.notificationType !== 'mention' || !item.retryAt ||
+          item.ownerRetryAt || item.delivered || Date.parse(item.retryAt) <= Date.now()) continue;
+      const failed = this.ownerPageFailure(item);
+      if (!failed || Date.now() - Date.parse(failed.createdAt) > 86400000) continue;
+      const due = new Date(Date.parse(failed.createdAt) + 120000).toISOString();
+      if (due < item.retryAt) store.updateInbox(item.id, { ownerRetryAt: due, retryAt: due });
+    }
   }
   focusFor(id: string) {
     if (id === 'bilibili') return this.focus;
@@ -145,7 +154,7 @@ export class SocialService {
       : [];
     const independent = hasIndependentOwnerComments(platform);
     const owner = records.filter(isOwnerCommentRecord);
-    const ordinary = records.filter(r => !isOwnerCommentRecord(r));
+    const ordinary = records.filter(r => !r.unlimitedOwnerNotification && !isOwnerCommentRecord(r));
     return {
       dailyUsed: accountId ? ordinary.length : null,
       ownerCommentsToday: accountId && independent ? owner.length : null,
@@ -167,8 +176,8 @@ export class SocialService {
     return [...this.states.values()].map((s) => ({
       ...s,
       enabled: this.cfg.platforms[s.id]?.enabled ?? false,
-      monitor: this.cfg.platforms[s.id]?.monitor.enabled ?? false,
-      posting: this.cfg.platforms[s.id]?.posting.enabled ?? false,
+      monitor: Boolean(this.cfg.platforms[s.id]?.enabled && this.cfg.platforms[s.id].monitor.enabled),
+      posting: Boolean(this.cfg.platforms[s.id]?.enabled && this.cfg.platforms[s.id].posting.enabled),
     }));
   }
   status() {
@@ -327,6 +336,33 @@ export class SocialService {
   private hasNotificationSend(i: InboxItem) {
     return this.store.hasSend(i.platform, i.accountId, i.target.oid, i.target.parent);
   }
+  private ownerPageFailure(item: InboxItem) {
+    if (item.status !== 'pending' || item.platform !== 'bilibili' || item.notificationType !== 'mention' ||
+        !this.focus.settings.enabled || this.focus.binding(item.accountId)?.ownerId !== item.authorId) return;
+    const rows = this.store.operationSends(`bilibili:${item.accountId}:reply:${item.id}`);
+    const first = rows[0];
+    if (rows.length !== 1 || first.inboxId !== item.id || first.status !== 'rejected' || first.receiptId ||
+        first.detail !== '评论区加载未完成（页面未就绪或等待超时），尚未提交；这不是平台审核回执。' ||
+        first.target.oid !== item.target.oid || first.target.type !== item.target.type ||
+        first.target.root !== item.target.root || first.target.parent !== item.target.parent ||
+        this.hasNotificationSend(item)) return;
+    return first;
+  }
+  ownerRetryReady(item: InboxItem | undefined) {
+    return Boolean(item?.ownerRetryAt && Date.parse(item.ownerRetryAt) <= Date.now() && this.ownerPageFailure(item));
+  }
+  deferInbox(id: string, minutes: number) {
+    const item = this.store.getInbox(id);
+    if (!item) throw Error('消息不存在');
+    if (item.status !== 'pending') return '这条待办已经处理。';
+    const retry = item.ownerRetryAt;
+    if (retry && (!item.deliveredAt || item.deliveredAt < retry) && this.ownerPageFailure(item)) {
+      this.store.updateInbox(id, { retryAt: retry, delivered: false });
+      return '主人这条 @ 的评论区尚未加载，确定没有提交。已保留原楼层，两分钟后优先复看一次。';
+    }
+    this.store.updateInbox(id, { retryAt: new Date(Date.now() + minutes * 60000).toISOString(), delivered: false });
+    return '已保留待办，' + minutes + '分钟后再考虑；此刻不重复提醒，也不占住闲逛。';
+  }
   private unsubmittedUIFailure(id: string) {
     const rows = this.store.outbox().filter((r) => r.inboxId === id);
     if (rows.some((r) => r.status !== 'rejected')) return undefined;
@@ -340,7 +376,10 @@ export class SocialService {
       : undefined;
   }
   handleInbox(id: string, reason?: string) {
-    if (!this.store.getInbox(id)) throw Error('消息不存在');
+    const item = this.store.getInbox(id);
+    if (!item) throw Error('消息不存在');
+    if (!reason?.trim() && item.ownerRetryAt && !item.delivered && this.ownerPageFailure(item))
+      return { status: 'pending' as const, message: '评论区尚未加载，已保留一次复看。' };
     if (this.unsubmittedUIFailure(id) && !reason?.trim()) {
       this.store.updateInbox(id, {
         status: 'pending',
@@ -405,7 +444,7 @@ export class SocialService {
           !this.notificationLimit(i),
       );
   }
-  async deliver(sink: (item: InboxItem) => Promise<void>, recoverPending = false, ownerCommentsOnly = false) {
+  async deliver(sink: (item: InboxItem) => Promise<void>, recoverPending = false, ownerCommentsOnly = false, canDeliver = () => true) {
     if (this.delivering || this.storageLimit()) return;
     this.delivering = true;
     try {
@@ -433,6 +472,7 @@ export class SocialService {
         )
         .sort(
           (a, b) =>
+            Number(this.ownerRetryReady(b)) - Number(this.ownerRetryReady(a)) ||
             Number(Boolean(b.focusOwnerId && b.notificationType === 'focus-comment')) -
               Number(Boolean(a.focusOwnerId && a.notificationType === 'focus-comment')) ||
             Number(Boolean(b.focusOwnerId)) - Number(Boolean(a.focusOwnerId)) ||
@@ -440,6 +480,7 @@ export class SocialService {
             a.occurredAt - b.occurredAt,
         )
         .slice(0, 3)) {
+        if (!canDeliver()) break;
         const assessment = assessPublicInput(i.text),
           limit = this.notificationLimit(i),
           auto = this.autoReply(i);
@@ -501,6 +542,11 @@ export class SocialService {
       this.store.comment(r.target)?.authorId
     );
   }
+  private boundOwnerLimit(platform: string, accountId: string, recipientId: string | undefined, notification: boolean) {
+    if (platform === 'bilibili' && notification && recipientId && this.cfg.focus.enabled &&
+        this.focus.binding(accountId)?.ownerId === recipientId)
+      return this.cfg.focus.outsideReplyLimit ?? MAX_REPLIES_PER_PERSON;
+  }
   private replyLimit(
     platform: string,
     accountId: string,
@@ -508,7 +554,9 @@ export class SocialService {
     notification: boolean,
     independentOwnerComment: boolean,
   ) {
-    if (independentOwnerComment) return;
+    const ownerLimit = this.boundOwnerLimit(platform, accountId, recipientId, notification);
+    if (independentOwnerComment || ownerLimit === -1) return;
+    if (ownerLimit === 0) return '已关闭主人在其他作品下的通知回复。';
     const today = this.day(new Date().toISOString());
     const records = this.store
       .outbox()
@@ -516,17 +564,15 @@ export class SocialService {
         (r) =>
           r.platform === platform &&
           r.accountId === accountId &&
-          !isOwnerCommentRecord(r) &&
+          !r.unlimitedOwnerNotification && !isOwnerCommentRecord(r) &&
           r.status !== 'rejected' &&
           this.day(r.createdAt) === today,
       );
     if (records.length >= this.cfg.platforms[platform].posting.maxDailyComments)
       return '已达到操作员设置的普通每日发布上限。';
-    const boundOwner = platform === 'bilibili' && notification && recipientId && this.cfg.focus.enabled &&
-      this.focus.binding(accountId)?.ownerId === recipientId;
-    const personLimit = boundOwner ? (this.cfg.focus.outsideReplyLimit ?? MAX_REPLIES_PER_PERSON) : MAX_REPLIES_PER_PERSON;
+    const personLimit = ownerLimit ?? MAX_REPLIES_PER_PERSON;
     if (recipientId && records.filter(r => this.recipient(r) === recipientId).length >= personLimit)
-      return boundOwner ? '今天对绑定主人账号的普通回复已达到设置上限。' : '今天已回应这位用户五条，请留到明天，不换楼层继续。';
+      return ownerLimit !== undefined ? '今天对绑定主人账号的普通回复已达到设置上限。' : '今天已回应这位用户五条，请留到明天，不换楼层继续。';
     if (
       notification &&
       records.filter((r) => Boolean(r.inboxId) && (!r.focusOwnerId || r.ownerAutoReply)).length >=
@@ -638,7 +684,7 @@ export class SocialService {
         JSON.stringify(prior.target) !== JSON.stringify(target)
       )
         throw Error('同一操作编号的内容发生变化，请先核实原发送记录。');
-      if (prior.status !== 'rejected' || !input.retryRejected)
+      if (prior.status !== 'rejected' || !input.retryRejected || (input.retryOf && input.retryOf !== prior.id))
         return {
           ...prior,
           reused: true,
@@ -761,7 +807,7 @@ export class SocialService {
     if (standalone && (!workOwnerId || focusOwnerId !== workOwnerId))
       throw new PublicReplySkipped('小红书独立评论仅支持已核实的主人作品。');
     if (
-      (source?.focusOwnerId || independentOwnerComment) &&
+      (source?.focusOwnerId || independentOwnerComment || source?.notificationType === 'mention') &&
       this.store.hasSend(input.platform, account.id, target.oid, target.parent)
     )
       throw new PublicReplySkipped(
@@ -862,6 +908,7 @@ export class SocialService {
       target,
       inboxId: input.inboxId,
       recipientId,
+      unlimitedOwnerNotification: (!focusOwnerId && this.boundOwnerLimit(input.platform, account.id, recipientId, Boolean(source)) === -1) || undefined,
       focusOwnerId,
       ownerAutoReply: source?.ownerAutoReply,
       roamId: independentOwnerComment ? undefined : input.roamId,
@@ -872,14 +919,22 @@ export class SocialService {
     });
     let receipt: Awaited<ReturnType<SocialPlatform['send']>>;
     try {
-      receipt = await adapter.send(target, text, signal, account.id, mention);
+      const useOwnerRoute = input.platform === 'xiaohongshu' && workOwnerId && focusOwnerId === workOwnerId;
+      receipt = useOwnerRoute
+        ? await adapter.send(target, text, signal, account.id, mention, workOwnerId)
+        : await adapter.send(target, text, signal, account.id, mention);
     } catch (e) {
       const certain =
         e instanceof PlatformError && ['auth', 'rate', 'rejected', 'invalid'].includes(e.kind);
-      return this.store.updateSend(id, {
+      const failure = this.store.updateSend(id, {
         status: certain ? 'rejected' : 'unknown',
         detail: e instanceof Error ? e.message : '结果无法确认，请核实评论区。',
       });
+      if (source && !source.ownerRetryAt && input.platform === 'bilibili' && certain && this.ownerPageFailure(source)) {
+        const due = new Date(Date.now() + 120000).toISOString();
+        this.store.updateInbox(source.id, { delivered: false, retryAt: due, ownerRetryAt: due });
+      }
+      return failure;
     }
     const ack = typeof receipt === 'string' ? { receiptId: receipt } : receipt;
     // Save the POST acknowledgement before any follow-up read. A failed read must never cause a resend.

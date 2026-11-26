@@ -890,6 +890,35 @@
   background: #173843;
   color: #a6e9ff;
 }
+/* Each platform uses one continuous settings surface. Only the selected group takes up space. */
+.socialmedia-desk .sm-settings { grid-template-columns: minmax(0, 1fr); }
+.socialmedia-desk .sm-setting-choices {
+  display: grid; grid-template-columns: repeat(4, minmax(0,1fr));
+  gap: 8px; margin: 16px 0 20px;
+}
+.socialmedia-desk .sm-setting-choices button {
+  display: grid; text-align: left; align-content: start; gap: 4px; min-width: 0;
+  border: 1px solid var(--sm-line); border-radius: 10px; padding: 12px 14px;
+  background: var(--sm-surface);
+}
+.socialmedia-desk .sm-setting-choices button small, .socialmedia-desk .sm-lab-platform small { opacity: .76; }
+.socialmedia-desk .sm-setting-choices button[aria-pressed='true'] {
+  border-color: var(--sm-accent);
+  background: color-mix(in srgb,var(--sm-accent) 12%,var(--sm-surface));
+  box-shadow: inset 0 -2px var(--sm-accent);
+}
+.socialmedia-desk .sm-lab-platform {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 12px;
+  padding-bottom: 12px; border-bottom: 1px solid var(--sm-line);
+}
+.socialmedia-desk .sm-lab-platform button { display: flex; align-items: center; gap: 10px; }
+.socialmedia-desk .sm-setting-choices button:focus-visible { outline: 2px solid var(--sm-accent); outline-offset: 2px; }
+.socialmedia-desk .sm-settings .sm-visual-card { margin-bottom: 0; }
+@container little-tv (max-width: 700px) {
+  .socialmedia-desk .sm-setting-choices { grid-template-columns: repeat(2,minmax(0,1fr)); gap: 6px; }
+  .socialmedia-desk .sm-setting-choices button { padding: 9px 11px; }
+}
+
 .socialmedia-desk .sm-platform-tabs {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(120px, 100%), 1fr));
@@ -1002,15 +1031,41 @@
   color: color-mix(in srgb, var(--sm-accent) 50%, currentColor);
 }
 
-.socialmedia-desk .sm-roaming-master {
-  padding: 18px 22px;
+.socialmedia-desk .sm-activity-settings {
+  margin-block: 14px;
+  border-block-start: 1px solid var(--sm-line);
+  padding-block-start: 12px;
 }
+.socialmedia-desk .sm-activity-settings > h3 { margin: 0 0 8px; }
+.socialmedia-desk .sm-activity-settings .sm-roaming-master {
+  padding: 0; border: 0; background: transparent; box-shadow: none;
+}
+.socialmedia-desk .sm-risk-badge,
+.socialmedia-desk .sm-posting-risk strong {
+  display: inline-block; border: 1px solid #d56b73; border-radius: 5px;
+  padding: 1px 6px; color: #ffb7bc; background: #48242c;
+  font-size: 12px; font-weight: 650; white-space: nowrap;
+}
+.socialmedia-desk .sm-risk-badge { margin-inline-start: 6px; }
+.socialmedia-desk .sm-posting-risk {
+  border-inline-start: 3px solid #e5757e; padding: 8px 12px; line-height: 1.6;
+  background: color-mix(in srgb, #d7505c 10%, transparent);
+}
+.socialmedia-desk .sm-posting-risk strong { margin-inline-end: 8px; }
 .socialmedia-desk .sm-roaming-master h3 {
   font-size: 16px;
 }
 .socialmedia-desk .sm-roaming-master > .sm-toggle {
   margin: 10px 0;
 }
+.socialmedia-desk .sm-active-hours small { display: block; margin-top: 8px; }
+.socialmedia-desk .sm-hours-fields:not([hidden]) {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 8px 0;
+}
+.socialmedia-desk .sm-hours-fields label { display: grid; gap: 4px; }
 .socialmedia-desk .sm-roaming-states {
   display: flex;
   flex-wrap: wrap;

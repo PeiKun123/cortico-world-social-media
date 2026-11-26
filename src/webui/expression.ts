@@ -245,6 +245,7 @@ export function expressionSettings(ctx: WebUiPanelContext, refreshPublic: () => 
       await refreshPublic();
     };
     const field = toggle('启用' + label + (key === 'tieba' ? '（实验）' : ''), false, value => savePlatform({ enabled: value }), result);
+    field.row.className = 'sm-lab-enable';
     const posting = toggle('允许公开发言', false, value => savePlatform({ 'posting.enabled': value }), result);
     const standalone = key === 'xiaohongshu'
       ? toggle('允许在主人作品下新发评论', false, value => savePlatform({ 'posting.allowTopLevelComments': value }), result)
@@ -369,7 +370,16 @@ export function expressionSettings(ctx: WebUiPanelContext, refreshPublic: () => 
       await refreshPublic();
     });
     closeLogin.hidden = true;
-    card.append(el('h3', label + ' · 账号与交流'), field.row, accountState,
+    card.append(el('h3', label + ' · 账号与交流'));
+    if (key === 'xiaohongshu') {
+      const risk = el('p');
+      risk.id = 'sm-xiaohongshu-posting-risk';
+      risk.className = 'sm-posting-risk';
+      risk.append(el('strong', '易风控'), document.createTextNode('已有用户反馈账号被限制发言。只看笔记时可关闭公开发言。'));
+      card.append(risk);
+      for (const control of [field, posting, standalone, reply]) control?.input.setAttribute('aria-describedby', risk.id);
+    }
+    card.append(field.row, accountState,
       el('p', (key === 'tieba' ? '若贴吧弹出验证，请先在专用窗口处理。' : '小红书通常需要先在专用窗口登录。') +
         '登录后保留专用窗口，回到这里点「核对并绑定登录账号」。绑定成功后专用窗口会关闭。'),
       action('打开' + label + '专用登录窗口', () => run('正在打开专用窗口…', async () => {
@@ -383,7 +393,6 @@ export function expressionSettings(ctx: WebUiPanelContext, refreshPublic: () => 
         await refreshPublic();
       })),
       closeLogin,
-      el('p', '账号绑定后，开启闲逛总开关即可按兴趣刷帖。可以在下方为本站选择活跃度。'),
       posting.row, visualLabel,
       focusSection, readSection, result);
     focusSection.append(el('summary', '特别关注'),
@@ -487,6 +496,10 @@ export function expressionSettings(ctx: WebUiPanelContext, refreshPublic: () => 
   const cards = el('div');
   cards.className = 'sm-experiment-cards';
   const practiceCard = el('article');
+  const practiceRisk = el('span', '易风控');
+  practiceRisk.className = 'sm-risk-badge';
+  practiceRisk.setAttribute('aria-hidden', 'true');
+  practice.row.append(practiceRisk);
   practiceCard.append(practice.row,
     el('p', '实验性网页陪练。小K自己选话题和 Gemini 聊，再试试学到的表达。网页版限额、登录失效或页面变动都可能暂停练习。'),
     el('p', '开启「开始训练」后消耗较高，建议按需开启。'),
@@ -496,7 +509,7 @@ export function expressionSettings(ctx: WebUiPanelContext, refreshPublic: () => 
     '在私聊或本地控制台里直接说「陪我练一句」。小K先找出一句明显像套话的表达，再只问一句「这句听着奇怪吗？」也可以告诉它你会怎么说。需要时才练，沿用当前聊天的模型，不另外打开 Gemini。'));
   cards.append(practiceCard, ownerPractice);
   body.className = 'sm-experiment-body';
-  body.append(cards, action('刷新练习与素材', () => refresh()), status, list);
+  body.append(el('p', '实验平台和练习每次启动 World 时关闭。手动开启后仅本次运行有效。'), cards, action('刷新练习与素材', () => refresh()), status, list);
   section.append(el('summary', '实验功能'), body);
   section.addEventListener('toggle', () => {
     if (section.open) void refresh().catch(error => { status.textContent = error.message; });

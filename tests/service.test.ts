@@ -386,6 +386,45 @@ describe('social service', () => {
   });
 });
 
+it.each(['owner','other','unknown','platform'] as const)('schedules one early look only for an unsubmitted owner mention: %s', async kind => {
+  const { s, cfg, store, adapter } = setup();
+  cfg.focus = { ...cfg.focus, enabled: true, account: '7' };
+  const item = { id: 'at', platform: 'bilibili', accountId: '42', authorId: kind === 'other' ? '8' : '7',
+    author: '观众', text: '@小鲸鱼 总结一下', notificationType: 'mention' as const, target,
+    occurredAt: 100, delivered: true, status: 'pending' as const };
+  store.addInbox(item);
+  const fail = '评论区加载未完成（页面未就绪或等待超时），尚未提交；这不是平台审核回执。';
+  adapter.send = vi.fn(async () => { throw new PlatformError(kind === 'platform' ? '平台拒绝' : fail,
+    kind === 'unknown' ? 'network' : 'rejected'); });
+  const input = { platform: 'bilibili', inboxId: 'at', text: '这个小细节真可爱。' };
+  const first = await s.publish(input);
+  s.deferInbox('at', 40);
+  const now = Date.now();
+  const delay = Date.parse(store.getInbox('at')!.retryAt!) - now;
+  expect(delay).toBeGreaterThan((kind === 'owner' ? 2 : 40) * 60000 - 5000);
+  expect(delay).toBeLessThanOrEqual((kind === 'owner' ? 2 : 40) * 60000);
+  expect(s.ownerRetryReady(store.getInbox('at'))).toBe(false);
+  if (kind !== 'owner') return;
+  expect(s.handleInbox('at').status).toBe('pending');
+  // Upgrade the original long deferral, then run the normal delivery and publish paths.
+  store.updateInbox('at', { ownerRetryAt: undefined, retryAt: new Date(now + 40 * 60000).toISOString() });
+  const restarted = new SocialService(cfg, store, new Map([['bilibili', adapter]]));
+  const clock = vi.spyOn(Date, 'now').mockReturnValue(now + 121000);
+  try {
+    await restarted.connect('bilibili');
+    expect(restarted.ownerRetryReady(store.getInbox('at'))).toBe(true);
+    const seen: string[] = [];
+    await restarted.deliver(async i => { seen.push(i.id); });
+    await restarted.deliver(async i => { seen.push(i.id); });
+    expect(seen).toEqual(['at']);
+    const retry = { ...input, retryRejected: true, retryOf: first.id };
+    await restarted.publish(retry);
+    await restarted.publish(retry);
+    expect(adapter.send).toHaveBeenCalledTimes(2);
+    expect(restarted.ownerRetryReady(store.getInbox('at'))).toBe(false);
+  } finally { clock.mockRestore(); }
+});
+
 describe('visibility receipts', () => {
   it('keeps a successful POST sent even when the public verification fails, without reposting', async () => {
     const x = setup();
@@ -716,6 +755,27 @@ it('blocks obsolete focus opportunities after disabling or rebinding, but preser
   ).toBe('sent');
   expect(x.sends()).toBe(1);
 });
+it('keeps unlimited owner notifications separate from ordinary quotas and supports disabling them', async () => {
+  const x = setup();
+  x.cfg.focus.enabled = true;
+  x.cfg.focus.account = '77';
+  const posting = x.cfg.platforms.bilibili.posting;
+  Object.assign(posting, { minIntervalSec: 0, maxDailyComments: 0, maxDailyReplies: 0 });
+  function reply(id: string, authorId: string) {
+    x.store.addInbox({ id, platform: 'bilibili', accountId: '42', authorId, author: '同名',
+      text: '讨论', target: { ...target, parent: id }, occurredAt: 1, status: 'pending' });
+    return x.s.publish({ platform: 'bilibili', inboxId: id, text: '谢谢分享' });
+  }
+  x.cfg.focus.outsideReplyLimit = -1;
+  await expect(reply('501', '77')).resolves.toMatchObject({ status: 'sent', unlimitedOwnerNotification: true });
+  await expect(reply('502', '78')).rejects.toThrow(/上限/);
+  Object.assign(posting, { maxDailyComments: 1, maxDailyReplies: 1 });
+  await expect(reply('503', '78')).resolves.toMatchObject({ status: 'sent' });
+  x.cfg.focus.outsideReplyLimit = 0;
+  await expect(reply('504', '77')).rejects.toThrow(/已关闭主人/);
+  expect(x.sends()).toBe(2);
+});
+
 it('raises only the bound Bilibili owner notification cap on other works', async () => {
   const x = setup();
   x.cfg.focus.enabled = true;
