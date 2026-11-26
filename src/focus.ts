@@ -1,6 +1,7 @@
+import { isPublicPostPlatform, profileId, profileUrl, PUBLIC_POST_TYPES } from './public-post-policy.ts';
 import { focusConfig } from './config.ts';
 import type { SocialMediaConfigSection } from './config.ts';
-import type { Account, PublicVideo, SocialPlatform, InboxItem } from './platform.ts';
+import { hasIndependentOwnerComments, PlatformError, type Account, type PublicVideo, type SocialPlatform, type InboxItem } from './platform.ts';
 import type { SocialStore } from './store.ts';
 import { assessPublicInput } from './safety.ts';
 export interface Contact {
@@ -26,6 +27,7 @@ export interface FocusWork {
 export interface FocusCheck {
   autoReplySince?: number;
   autoReplySeen?: Record<string, string[]>;
+  commentScans?: Record<string, { cursor?: string; baseline?: boolean }>;
   at: number;
   nextAt: number;
   cursor?: number;
@@ -36,18 +38,11 @@ export function parseFocusAccount(
   platform = 'bilibili',
 ): { uid?: string; name?: string } {
   const value = raw.normalize('NFKC').trim();
-  if (platform === 'kuaishou') {
-    if (value.includes('://')) {
-      const u = new URL(value),
-        id = u.pathname.match(/^\/profile\/([A-Za-z0-9_-]{5,80})\/?$/)?.[1];
-      if (u.origin !== 'https://www.kuaishou.com' || u.username || u.password || !id)
-        throw Error('请填写快手官网完整主页');
-      return { uid: id };
-    }
-    if (/^3x[a-z0-9]{10,30}$/i.test(value)) return { uid: value };
-    if (!value || value.length > 80 || /[\s/\\]/.test(value))
-      throw Error('请填写准确快手号或完整用户主页');
-    return { name: value };
+  if (isPublicPostPlatform(platform)) {
+    const profile = profileId(platform, value);
+    if (!profile) throw Error('请填写平台官网完整的主人个人主页链接。');
+    // Let the adapter confirm the first visit before pinning the platform identity.
+    return { name: profile.url.href };
   }
   if (platform === 'douyin') {
     if (/^MS4w[A-Za-z0-9_.-]{10,200}$/.test(value)) return { uid: value };
@@ -158,8 +153,8 @@ export class OwnerFocus {
               ? 'awaiting-account'
               : 'unresolved',
         profileUrl: binding
-          ? this.platform === 'kuaishou'
-            ? 'https://www.kuaishou.com/profile/' + encodeURIComponent(binding.ownerId)
+          ? isPublicPostPlatform(this.platform)
+            ? (profileId(this.platform, binding.input)?.url ?? profileUrl(this.platform, binding.ownerId)).href
             : this.platform === 'douyin'
               ? 'https://www.douyin.com/user/' + encodeURIComponent(binding.ownerId)
               : 'https://space.bilibili.com/' + encodeURIComponent(binding.ownerId)
@@ -226,7 +221,12 @@ export class OwnerFocus {
       input = this.settings.account.trim();
     let key = this.key(account.id, binding?.ownerId ?? 'resolve:' + input);
     let prior = this.store.focusCheck(key);
-    if (prior && prior.nextAt > now && (!force || now - prior.at < 60000)) return;
+    const autoConfigured = Boolean(this.settings.autoReplyNewComments);
+    const interval = autoConfigured ? (this.settings.autoReplyIntervalMinutes ?? 2) : this.settings.intervalMinutes;
+    const nextAt = prior && autoConfigured && !prior.error && hasIndependentOwnerComments(this.platform)
+      ? Math.min(prior.nextAt, prior.at + interval * 60000)
+      : prior?.nextAt;
+    if (prior && nextAt && nextAt > now && (!force || now - prior.at < 60000)) return;
     this.polling = true;
     let partialError: string | undefined;
     try {
@@ -275,7 +275,7 @@ export class OwnerFocus {
       for (const w of works) this.store.rememberVideo({ ...w.video });
       const target = (aid: string) => ({
         oid: aid,
-        type: this.platform === 'douyin' ? 2 : this.platform === 'kuaishou' ? 3 : 1,
+        type: isPublicPostPlatform(this.platform) ? PUBLIC_POST_TYPES[this.platform] : this.platform === 'douyin' ? 2 : 1,
         root: '0',
         parent: '0',
       });
@@ -298,7 +298,12 @@ export class OwnerFocus {
           text:
             '特别关注的新作品：' +
             fresh.video.title +
-            '。先了解作品，再决定是否真诚捧场；无需硬夸或补发。',
+            (isPublicPostPlatform(this.platform)
+              ? '。先读正文，用 watch 看图文或视频，再读原评论。' +
+                (this.platform === 'xiaohongshu' && this.cfg.platforms.xiaohongshu.posting.allowTopLevelComments
+                  ? '有具体想说的内容时，可用本条机会准备一条独立评论，也可以在精确楼层接话。'
+                  : '有合适的原评论时，按准确楼层回复。')
+              : '。先了解作品，再决定是否真诚捧场；无需硬夸或补发。'),
           target: target(fresh.video.aid),
           occurredAt: now / 1000,
           status: 'pending',
@@ -312,8 +317,12 @@ export class OwnerFocus {
         ),
       );
       const autoReplySince = prior?.autoReplySince ?? now / 1000;
+      const scanAllComments = auto && this.platform === 'xiaohongshu';
+      const commentScans = Object.fromEntries(Object.entries(prior?.commentScans ?? {})
+        .filter(([id]) => works.some(w => w.video.aid === id)));
       const recent = works.slice(0, auto ? this.settings.maxVideos : 3),
-        selected = recent.length ? recent[(prior?.cursor ?? 0) % recent.length] : undefined;
+        selected = (this.platform === 'xiaohongshu' ? fresh : undefined) ??
+          (recent.length ? recent[(prior?.cursor ?? 0) % recent.length] : undefined);
       const scan = auto
         ? [
             ...new Map(
@@ -326,45 +335,40 @@ export class OwnerFocus {
           ? [selected]
           : [];
       for (const selected of scan) {
-        const firstAutoScan = !autoReplySeen[selected.video.aid];
-        const seen = new Set(autoReplySeen[selected.video.aid] ?? []);
-        const pages = [
-          await adapter.comments(target(selected.video.aid), 1, combined),
-        ] as Array<any>;
-        if (auto)
-          for (let page = 2; page <= 3 && pages.at(-1)?.nextCursor; page++) {
-            try {
-              pages.push(
-                await adapter.comments(
-                  target(selected.video.aid),
-                  page,
-                  combined,
-                  pages.at(-1).nextCursor,
-                ),
-              );
-            } catch (e) {
-              if (combined.aborted) throw e;
-              partialError = '后续评论页未读全，保留本次已读评论，下次继续检查。';
-              break;
-            }
+        const workId = selected.video.aid;
+        const previousScan = scanAllComments ? commentScans[workId] : undefined;
+        const firstAutoScan = !autoReplySeen[workId] || (scanAllComments && !previousScan);
+        const seen = new Set(autoReplySeen[workId] ?? []);
+        type CommentPage = { items?: Array<
+          import('./platform.ts').PublicComment & { replies?: import('./platform.ts').PublicComment[] }
+        >; nextCursor?: string };
+        const head = await adapter.comments(target(workId), 1, combined) as CommentPage;
+        const pages = [{ data: head, baseline: firstAutoScan }];
+        // Check the head on every round, then use the remaining slots to continue the previous sweep.
+        let cursor = previousScan?.cursor ?? head.nextCursor;
+        const baseline = previousScan?.cursor ? Boolean(previousScan.baseline) : firstAutoScan;
+        if (auto) for (let page = 2; page <= 3 && cursor; page++) {
+          try {
+            const data = await adapter.comments(target(workId), page, combined, cursor) as CommentPage;
+            pages.push({ data, baseline });
+            cursor = data.nextCursor === cursor ? undefined : data.nextCursor;
+          } catch (error) {
+            if (combined.aborted && !scanAllComments) throw error;
+            partialError = '后续评论页未读全，保留本次已读评论，下次继续检查。';
+            break;
           }
-        for (const page of pages) this.store.rememberComments(page);
-        const p = { items: pages.flatMap((page) => page.items ?? []) } as {
-          items?: Array<
-            import('./platform.ts').PublicComment & {
-              createdAt?: number;
-              replies?: import('./platform.ts').PublicComment[];
-            }
-          >;
-        };
-        const comments = (p.items ?? []).flatMap((c) => [c, ...(c.replies ?? [])]);
+        }
+        if (scanAllComments) commentScans[workId] = cursor ? { cursor, baseline } : {};
+        for (const { data } of pages) this.store.rememberComments(data);
+        const comments = pages.flatMap(({ data, baseline }) =>
+          (data.items ?? []).flatMap(c => [c, ...(c.replies ?? [])]).map(c => ({ c, baseline })));
         let queued = 0;
-        for (const c of comments) {
-          if (!auto && queued >= 2) break;
+        for (const { c, baseline } of comments) {
+          if ((!auto || (isPublicPostPlatform(this.platform) && !scanAllComments)) && queued >= 2) break;
           if (auto) {
             const fresh =
               Boolean(this.settings.replyExistingComments) ||
-              (!seen.has(c.id) && (c.createdAt ? c.createdAt >= autoReplySince : !firstAutoScan));
+              (!seen.has(c.id) && (c.createdAt ? c.createdAt >= autoReplySince : !baseline));
             seen.add(c.id);
             if (!fresh) continue;
           }
@@ -406,6 +410,7 @@ export class OwnerFocus {
             authorId: c.authorId,
             author: c.author,
             text: c.text.slice(0, 1500),
+            ...(c.imageCount ? { imageCount: c.imageCount } : {}),
             target: c.target,
             occurredAt: now / 1000,
             status: 'pending',
@@ -418,25 +423,29 @@ export class OwnerFocus {
         }
         if (auto) {
           autoReplySeen[selected.video.aid] = [...seen].slice(-1000);
-          prior = { ...(prior ?? { at: now, nextAt: now }), autoReplySince, autoReplySeen };
+          prior = { ...(prior ?? { at: now, nextAt: now }), autoReplySince, autoReplySeen,
+            ...(scanAllComments ? { commentScans } : {}) };
           this.store.saveFocusCheck(key, prior);
         }
+        if (scanAllComments && combined.aborted) break;
       }
       this.store.saveFocusCheck(key, {
         ...prior,
         at: now,
-        nextAt:
-          now +
-          (auto ? (this.settings.autoReplyIntervalMinutes ?? 2) : this.settings.intervalMinutes) *
-            60000,
+        nextAt: now + interval * 60000,
         cursor: (prior?.cursor ?? 0) + 1,
         error: partialError,
       });
     } catch (e) {
+      if (signal?.aborted) return;
+      const protectedFailure = e instanceof PlatformError && ['auth', 'rate'].includes(e.kind);
+      const retryMinutes = autoConfigured && hasIndependentOwnerComments(this.platform) && !protectedFailure
+        ? Math.min(interval, 5)
+        : Math.max(10, this.settings.intervalMinutes);
       this.store.saveFocusCheck(key, {
         ...prior,
         at: now,
-        nextAt: now + Math.max(10, this.settings.intervalMinutes) * 60000,
+        nextAt: Date.now() + retryMinutes * 60000,
         cursor: prior?.cursor ?? 0,
         error: e instanceof Error ? e.message.slice(0, 200) : '关注读取暂不可用',
       });

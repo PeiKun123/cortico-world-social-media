@@ -1,7 +1,9 @@
+import { ROAMING_PLATFORMS } from './config.ts';
 import type { DynamicPost } from './dynamic-publishing.ts';
 import type { DynamicOffer } from './dynamic-autonomy.ts';
 import { SendArchive } from './archive.ts';
 import type { PublicDynamic } from './platforms/bilibili-dynamics.ts';
+import type { DouyinVerificationCheckpoint } from './platforms/douyin.ts';
 import { RESOURCE_DEFAULTS, type ResourceConfig } from './resources.ts';
 import {
   existsSync,
@@ -26,6 +28,7 @@ import type {
 
 import type { FocusBinding, FocusWork, FocusCheck, Contact } from './focus.ts';
 interface State {
+  douyinVerification?: DouyinVerificationCheckpoint;
   dynamicOffers?: Record<string, DynamicOffer>;
   dynamicPosts?: DynamicPost[];
   dynamics?: PublicDynamic[];
@@ -48,6 +51,8 @@ interface State {
   >;
 }
 /** One store per deployment. Writes replace a complete, bounded snapshot atomically. */
+const activePlatforms: ReadonlySet<string> = new Set(ROAMING_PLATFORMS);
+
 export class SocialStore {
   private state: State;
   private recordsVersion = randomUUID();
@@ -145,6 +150,13 @@ export class SocialStore {
         }
       if (changed) this.save();
     }
+  }
+  douyinVerification() {
+    return structuredClone(this.state.douyinVerification);
+  }
+  saveDouyinVerification(value?: DouyinVerificationCheckpoint) {
+    this.state.douyinVerification = structuredClone(value);
+    this.save();
   }
   dynamicOffer(accountId: string) {
     return structuredClone(this.state.dynamicOffers?.[accountId]);
@@ -326,6 +338,7 @@ export class SocialStore {
         authorId: comment.authorId,
         author: String(comment.author || '').slice(0, 80),
         text: String(comment.text || '').slice(0, 1500),
+        ...(comment.imageCount ? { imageCount: Math.min(12, comment.imageCount) } : {}),
         target: structuredClone(comment.target),
       },
     ].slice(-1000);
@@ -342,6 +355,7 @@ export class SocialStore {
           authorId: c.authorId,
           author: String(c.author || '').slice(0, 80),
           text: c.text.slice(0, 1500),
+          ...(c.imageCount ? { imageCount: Math.min(12, c.imageCount) } : {}),
           target: structuredClone(c.target),
         });
     };
@@ -406,8 +420,9 @@ export class SocialStore {
   }
   interactionCounts() {
     let pending = 0, sent = 0, unknown = 0, unconfirmed = 0;
-    for (const entry of this.state.inbox) if (entry.status === 'pending') pending++;
+    for (const entry of this.state.inbox) if (activePlatforms.has(entry.platform ?? 'bilibili') && entry.status === 'pending') pending++;
     for (const r of this.state.outbox) {
+      if (!activePlatforms.has(r.platform ?? 'bilibili')) continue;
       if (r.status === 'sent') sent++;
       if (r.status === 'unknown') unknown++;
       if (
@@ -444,13 +459,13 @@ export class SocialStore {
     const targetKey = ({ type, oid, parent }: CommentTarget) => JSON.stringify([type, oid, parent]);
     const referenced = new Set<string>();
     const works = new Set<string>();
-    const inbox = this.state.inbox.map((entry) => {
+    const inbox = this.state.inbox.filter(entry => activePlatforms.has(entry.platform ?? 'bilibili')).map((entry) => {
       works.add(entry.target.oid);
       if (!compact) return entry;
       const { delivered, deliveredAt, ...shown } = entry;
       return shown;
     }).sort((a, b) => b.occurredAt - a.occurredAt);
-    const outbox = [...this.state.outbox].reverse().map((record) => {
+    const outbox = this.state.outbox.filter(record => activePlatforms.has(record.platform ?? 'bilibili')).reverse().map((record) => {
       works.add(record.target.oid);
       if (!compact || !record.preparation?.parent) referenced.add(targetKey(record.target));
       if (!compact) return record;
@@ -517,7 +532,7 @@ export class SocialStore {
   historyStatus() {
     return {
       ...this.archive.status(),
-      recent: this.state.outbox.length,
+      recent: this.state.outbox.filter(record => activePlatforms.has(record.platform ?? 'bilibili')).length,
       maxArchiveBytes:
         (this.resourceSettings().maxArchiveMB ?? RESOURCE_DEFAULTS.maxArchiveMB) * 1048576,
     };
@@ -581,7 +596,7 @@ export class SocialStore {
   updateSend(
     id: string,
     patch: Partial<
-      Pick<SendRecord, 'status' | 'receiptId' | 'detail' | 'platformState' | 'visibility'>
+      Pick<SendRecord, 'status' | 'receiptId' | 'detail' | 'platformState' | 'visibility' | 'visibilityFollowupAt'>
     >,
   ) {
     const r = this.state.outbox.find((x) => x.id === id);

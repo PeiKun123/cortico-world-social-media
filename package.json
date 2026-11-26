@@ -1,8 +1,8 @@
 {
   "name": "cortico-world-social-media",
-  "version": "0.6.12",
+  "version": "0.6.13",
   "type": "module",
-  "description": "小鲸鱼爱冲浪：B站视频、动态读写与评论，实验接入抖音、快手与 Gemini 网页陪练；按作品归档互动，分平台设置特别关注与闲逛，B站可选主动@关注、抖音可监听指定群。快手暂不支持图文发评与群聊。沿用现有模型。",
+  "description": "小鲸鱼爱冲浪：在 B 站、抖音、小红书和贴吧读作品、看评论并特别关注主人。按平台设置闲逛和评论权限，可选语料学习与 Gemini 网页陪练。百度贴吧为实验接入。",
   "license": "MIT",
   "engines": {
     "node": ">=22.16"
@@ -17,21 +17,21 @@
     "comments",
     "companion",
     "douyin",
-    "kuaishou"
+    "xiaohongshu",
+    "tieba"
   ],
   "cortico": {
     "kind": "world",
     "api": 6,
     "displayName": "小鲸鱼爱冲浪",
     "describe": "describe.json",
-    "webUiClient": "dist/webui-surf-0612-release.js",
-    "webUiStyle": "dist/webui-surf-0612-release.css",
+    "webUiClient": "dist/webui-surf-idle-clock.js",
+    "webUiStyle": "dist/webui-surf-idle-clock.css",
     "tags": [
       "video",
       "browser",
       "internet",
       "external-setup",
-      "experimental",
       "high-cost",
       "unofficial-api"
     ],
@@ -39,27 +39,23 @@
     "locales": {
       "zh": {
         "displayName": "小鲸鱼爱冲浪",
-        "description": "小鲸鱼爱冲浪：B站视频、动态读写与评论，实验接入抖音、快手与 Gemini 网页陪练；按作品归档互动，分平台设置特别关注与闲逛，B站可选主动@关注、抖音可监听指定群。快手暂不支持图文发评与群聊。沿用现有模型。"
+        "description": "小鲸鱼爱冲浪：在 B 站、抖音、小红书和贴吧读作品、看评论并特别关注主人。按平台设置闲逛和评论权限，可选语料学习与 Gemini 网页陪练。百度贴吧为实验接入。"
       },
       "en": {
         "displayName": "Little Whale Loves Surfing",
-        "description": "Little Whale Loves Surfing: Bilibili videos, text dynamics and comments, with experimental Douyin and Kuaishou adapters and Gemini web coaching. Per-work records, owner focus and roaming; opt-in Bilibili focus mentions and allowlisted Douyin groups. No Kuaishou image-post comments or group chats. Uses your existing model."
+        "description": "Browse works and comments on Bilibili, Douyin, Xiaohongshu and Tieba. Configure owner focus, browsing and comment permissions by platform. Includes optional expression learning and Gemini web coaching. Tieba is experimental."
       }
-    },
-    "screenshots": [
-      "assets/timeline.png",
-      "assets/settings.png",
-      "assets/limits.png"
-    ]
+    }
   },
   "files": [
     "src",
-    "dist",
+    "dist/webui-surf-idle-clock.js",
+    "dist/webui-surf-idle-clock.css",
     "describe.json",
     "README.md",
     "CHANGELOG.md",
     "LICENSE",
-    "assets"
+    "assets/icon-surf.png"
   ],
   "scripts": {
     "build": "node scripts/build.mjs",

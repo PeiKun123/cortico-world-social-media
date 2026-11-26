@@ -1,4 +1,4 @@
-import { afterEach, expect, it } from 'vitest';
+import { afterEach, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -339,6 +339,35 @@ it('retains an actionable resolution error and retries on explicit refresh witho
   expect(f.binding('bot')).toBeUndefined();
 });
 
+it('picks up a shorter owner scan interval and retries a temporary read on that cadence', async () => {
+  const x = setup();
+  x.cfg.focus.account = '7';
+  x.cfg.focus.intervalMinutes = 60;
+  x.cfg.focus.autoReplyNewComments = true;
+  x.cfg.focus.autoReplyIntervalMinutes = 20;
+  const t0 = Date.now();
+  const now = vi.spyOn(Date, 'now').mockReturnValue(t0);
+  const account = { id: '42', name: '小K' };
+  const creatorVideos = vi.fn().mockResolvedValue({ items: [] });
+  const adapter = { creatorVideos, comments: async () => ({ items: [] }) };
+  try {
+    await x.focus.poll(adapter, account);
+    x.cfg.focus.autoReplyIntervalMinutes = 5;
+    now.mockReturnValue(t0 + 5 * 60000);
+    creatorVideos.mockRejectedValueOnce(new Error('网页读取超时'));
+    await x.focus.poll(adapter, account);
+    expect(creatorVideos).toHaveBeenCalledTimes(2);
+    expect(x.focus.status(account.id).check).toMatchObject({
+      error: '网页读取超时', nextAt: t0 + 10 * 60000,
+    });
+    now.mockReturnValue(t0 + 10 * 60000);
+    await x.focus.poll(adapter, account);
+    expect(creatorVideos).toHaveBeenCalledTimes(3);
+  } finally {
+    now.mockRestore();
+  }
+});
+
 it('baselines owner comments then queues every newly observed safe comment without a two-item selection cap', async () => {
   const x = setup();
   x.cfg.focus.account = '7';
@@ -432,13 +461,13 @@ it('retains a successful first comment page when a later page fails and reports 
   expect(x.focus.status('42').check?.error).toContain('后续评论页');
 });
 
-it('keeps owner identity distinct from an unavailable Kuaishou work list', async () => {
+it('keeps owner identity distinct from an unavailable Xiaohongshu work list', async () => {
   const x = setup();
-  x.cfg.platforms.kuaishou.focus = { ...x.cfg.focus, account: '123456789' };
-  const f = new OwnerFocus(x.cfg, x.store, 'kuaishou');
+  x.cfg.platforms.xiaohongshu.focus = { ...x.cfg.focus, account: 'https://www.xiaohongshu.com/user/profile/5d7fcb4500000001000190be' };
+  const f = new OwnerFocus(x.cfg, x.store, 'xiaohongshu');
   await f.poll(
     {
-      resolveCreator: async () => ({ id: '3xowner123456', name: '主人的账号' }),
+      resolveCreator: async () => ({ id: '5d7fcb4500000001000190be', name: '主人的账号' }),
       creatorVideos: async () => {
         throw Error('官网作品列表暂未返回');
       },
@@ -447,7 +476,7 @@ it('keeps owner identity distinct from an unavailable Kuaishou work list', async
     { id: 'bot', name: 'bot' },
   );
   expect(f.status('bot')).toMatchObject({
-    identity: { state: 'bound', profileUrl: 'https://www.kuaishou.com/profile/3xowner123456' },
+    identity: { state: 'bound', profileUrl: 'https://www.xiaohongshu.com/user/profile/5d7fcb4500000001000190be' },
     reading: { state: 'incomplete', cachedWorks: 0 },
   });
   expect(f.status('bot').identity.notice).toContain('已绑定');
@@ -457,8 +486,8 @@ it('keeps owner identity distinct from an unavailable Kuaishou work list', async
 
 it('does not claim identity is resolved when owner lookup itself fails', async () => {
   const x = setup();
-  x.cfg.platforms.kuaishou.focus = { ...x.cfg.focus, account: '123456789' };
-  const f = new OwnerFocus(x.cfg, x.store, 'kuaishou');
+  x.cfg.platforms.xiaohongshu.focus = { ...x.cfg.focus, account: 'https://www.xiaohongshu.com/user/profile/5d7fcb4500000001000190be' };
+  const f = new OwnerFocus(x.cfg, x.store, 'xiaohongshu');
   await f.poll(
     {
       resolveCreator: async () => {
@@ -480,7 +509,7 @@ it('does not report a missing owner while the bot account is still being checked
   expect(x.focus.status('').identity.notice).toContain('不代表主人绑定丢失');
 });
 
-it.each(['bilibili', 'douyin', 'kuaishou'])(
+it.each(['bilibili', 'douyin', 'xiaohongshu', 'tieba'])(
   'considers ordinary, emoji and owner comments on %s owner works',
   async (platform) => {
     const x = setup();
@@ -489,7 +518,7 @@ it.each(['bilibili', 'douyin', 'kuaishou'])(
         ? '7'
         : platform === 'douyin'
           ? 'MS4wLjABAAAAfocus_owner'
-          : '3xowner123456';
+          : '5d7fcb4500000001000190be';
     const bot =
       platform === 'bilibili'
         ? '42'
@@ -501,13 +530,16 @@ it.each(['bilibili', 'douyin', 'kuaishou'])(
         ? owner
         : platform === 'douyin'
           ? 'https://www.douyin.com/user/' + owner
-          : 'https://www.kuaishou.com/profile/' + owner;
+          : platform === 'tieba'
+            ? 'https://tieba.baidu.com/home/main?id=' + owner
+            : 'https://www.xiaohongshu.com/user/profile/' + owner;
     const settings = { ...x.cfg.focus, account, autoReplyNewComments: true };
     if (platform === 'bilibili') x.cfg.focus = settings;
     else x.cfg.platforms[platform].focus = settings;
     const focus = new OwnerFocus(x.cfg, x.store, platform);
     let fresh = false;
     const adapter = {
+      resolveCreator: async () => ({ id: owner, name: '主人的账号' }),
       creatorVideos: async () => ({
         items: [
           {
@@ -575,6 +607,41 @@ it.each(['bilibili', 'douyin', 'kuaishou'])(
     ).toEqual(['101', '102']);
   },
 );
+
+it('keeps all eligible Xiaohongshu comments and their images across a resumed scan', async () => {
+  const x = setup();
+  const owner = '5d7fcb4500000001000190be', bot = 'xiaohongshu-bot';
+  const account = 'https://www.xiaohongshu.com/user/profile/' + owner;
+  x.cfg.platforms.xiaohongshu.focus = { ...x.cfg.focus, account, autoReplyNewComments: true };
+  const key = 'xiaohongshu:' + bot + ':' + owner;
+  x.store.saveFocusCheck(key, { at: 1, nextAt: 0, autoReplySince: 1, autoReplySeen: { note: ['old'] }, commentScans: { note: {} } });
+  const calls: Array<string | undefined> = [];
+  const make = (id: string, root = id, imageCount?: number) => ({
+    id, author: '读者', authorId: 'reader-' + id, text: imageCount ? '' : '哪一段最值得看',
+    target: { oid: 'note', type: 5, root, parent: id }, imageCount,
+  });
+  const adapter = {
+    resolveCreator: async () => ({ id: owner, name: '主人' }),
+    creatorVideos: async () => ({ items: [{ aid: 'note', id: 'note', title: '主人作品', ownerId: owner, url: account + '/note' }] }),
+    comments: async (_target: unknown, _page: number, _signal?: AbortSignal, cursor?: string) => {
+      calls.push(cursor);
+      if (!cursor) return { items: [make('old'), make('one'), make('two'), make('photo', 'two', 1)], nextCursor: 'a' };
+      if (cursor === 'a') return { items: [make('three')], nextCursor: 'b' };
+      if (cursor === 'b') return { items: [make('four')], nextCursor: 'c' };
+      return { items: [make('five')] };
+    },
+  };
+  await new OwnerFocus(x.cfg, x.store, 'xiaohongshu').poll(adapter, { id: bot, name: 'bot' });
+  x.store.saveFocusCheck(key, { ...x.store.focusCheck(key)!, nextAt: 0 });
+  const reopened = new SocialStore(x.dir);
+  await new OwnerFocus(x.cfg, reopened, 'xiaohongshu').poll(adapter, { id: bot, name: 'bot' });
+  const queue = reopened.inbox().filter(item => item.notificationType === 'focus-comment');
+  expect(calls).toContain('c');
+  expect(queue.map(item => item.target.parent)).toEqual(['one', 'two', 'photo', 'three', 'four', 'five']);
+  expect(queue.find(item => item.target.parent === 'photo')).toMatchObject({
+    imageCount: 1, target: { root: 'two', parent: 'photo' },
+  });
+});
 
 it('can catch up an already baselined owner comment when existing replies are explicitly enabled', async () => {
   const x = setup();

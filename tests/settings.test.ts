@@ -17,11 +17,11 @@ it('accepts free roaming and independent platform policies without changing publ
   expect(
     settingsPatch({
       'worlds.socialmedia.roaming.mode': 'free',
-      'worlds.socialmedia.platforms.kuaishou.roaming.idleMinutes': 3,
+      'worlds.socialmedia.platforms.xiaohongshu.roaming.idleMinutes': 3,
     }),
   ).toEqual({
     roaming: { mode: 'free' },
-    platforms: { kuaishou: { roaming: { idleMinutes: 3 } } },
+    platforms: { xiaohongshu: { roaming: { idleMinutes: 3 } } },
   });
 });
 it('validates the local Douyin group allowlist separately from posting and focus settings', () => {

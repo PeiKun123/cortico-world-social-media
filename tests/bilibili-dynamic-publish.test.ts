@@ -156,7 +156,7 @@ it.skipIf(!findBrowserExecutable())(
       headless: true,
     });
     try {
-      for (const uid of ['7', '8']) {
+      for (const [uid, separator] of [['7', ' '], ['7', ''], ['8', '']]) {
         const context = await browser.newContext();
         await context.setOffline(true);
         const page = await context.newPage();
@@ -165,11 +165,12 @@ it.skipIf(!findBrowserExecutable())(
             contentType: 'text/html; charset=utf-8',
             body: `<div class="bili-dyn-publishing"><div contenteditable="true" style="white-space:pre-wrap;min-height:24px" class="bili-rich-textarea__inner"></div><div class="bili-dyn-publishing__tools__item at">@</div><div class="bili-dyn-publishing__action launcher disabled">发布</div></div><div class="bili-at-popup" style="display:none"><div class="bili-at-popup__user"><span>主人</span></div></div><script>
     window.cleared=false;const e=document.querySelector('[contenteditable]'),b=document.querySelector('.launcher'),popup=document.querySelector('.bili-at-popup');e.onkeydown=x=>{if(x.key==='Backspace')window.cleared=true};e.oninput=()=>b.classList.toggle('disabled',!e.innerText.trim());document.querySelector('.at').onclick=()=>{popup.style.display='block'};
-    document.querySelector('.bili-at-popup__user').onclick=()=>{const token=document.createElement('span');token.contentEditable='false';token.textContent='@主人';token.dataset.data=JSON.stringify({data:{type:'at',rid:'${uid}'}});e.replaceChildren(token,document.createTextNode(' '));popup.style.display='none';e.focus();const range=document.createRange();range.selectNodeContents(e);range.collapse(false);getSelection().removeAllRanges();getSelection().addRange(range);};
+    document.querySelector('.bili-at-popup__user').onclick=()=>{const token=document.createElement('span');token.contentEditable='false';token.textContent='@主人';token.dataset.data=JSON.stringify({data:{type:'at',rid:'${uid}'}});e.replaceChildren(token,document.createTextNode('${separator}'));popup.style.display='none';e.focus();const range=document.createRange();range.selectNodeContents(e);range.collapse(false);getSelection().removeAllRanges();getSelection().addRange(range);};
    </script>`,
           }),
         );
         await page.goto('https://t.bilibili.com/');
+        const text = '第一段\n\n第二段';
         if (uid === '7')
           expect(await prepareDynamicPage(page, { text, mention: { id: '7', name: '主人' } })).toBe(
             '@主人 ' + text,

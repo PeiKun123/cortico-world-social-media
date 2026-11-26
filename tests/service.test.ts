@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { SocialService } from '../src/service.ts';
 import { SocialStore } from '../src/store.ts';
 import { SOCIALMEDIA_DEFAULTS } from '../src/config.ts';
-import { PlatformError, type SocialPlatform } from '../src/platform.ts';
+import { PlatformError, type CommentTarget, type SocialPlatform } from '../src/platform.ts';
 import { normalizeTarget } from '../src/platforms/bilibili.ts';
 const dirs: string[] = [];
 afterEach(() => {
@@ -47,6 +47,89 @@ function setup() {
 }
 const target = { oid: '99', type: 1, root: '100', parent: '101' };
 describe('social service', () => {
+  it('requires separate permission and a verified owner for a Xiaohongshu standalone comment', async () => {
+    const { cfg, store, adapter: base, sends } = setup();
+    const settings = cfg.platforms.xiaohongshu;
+    settings.enabled = true;
+    settings.posting.enabled = true;
+    settings.posting.minIntervalSec = 0;
+    const ownerId = '5d7fcb4500000001000190be';
+    const oid = '0123456789abcdef01234567';
+    const profile = 'https://www.xiaohongshu.com/user/profile/' + ownerId;
+    settings.focus = { ...cfg.focus, enabled: true, account: profile };
+    const adapter: SocialPlatform = { ...base, id: 'xiaohongshu', normalizeTarget: raw => raw as CommentTarget };
+    const service = new SocialService(cfg, store, new Map([['xiaohongshu', adapter]]));
+    const input = { platform: 'xiaohongshu', requestId: 'first', text: '这个转场挺自然。',
+      target: { oid, type: 5, root: '0', parent: '0' } };
+    await expect(service.publish(input)).rejects.toThrow('允许在主人作品下新发评论');
+    settings.posting.allowTopLevelComments = true;
+    await expect(service.publish(input)).rejects.toThrow('已核实的主人作品');
+    store.saveFocusBinding({ platform: 'xiaohongshu', accountId: '42', ownerId, input: profile, name: '主人', method: 'uid' });
+    store.saveFocusWorks([{ platform: 'xiaohongshu', accountId: '42', ownerId,
+      video: { id: oid, aid: oid, ownerId, title: '雨后散步', url: 'https://www.xiaohongshu.com/explore/' + oid, updatedAt: new Date().toISOString() } }]);
+    await expect(service.publish(input)).resolves.toMatchObject({ status: 'sent' });
+    await expect(service.publish({ ...input, requestId: 'second' })).rejects.toThrow('已有发送记录');
+    expect(sends()).toBe(1);
+  });
+
+  it.each([
+    ['bilibili', '7', '7', 1, 'https://www.bilibili.com/video/av88'],
+    ['douyin', 'owner-sec-id', 'https://www.douyin.com/user/owner-sec-id', 2, 'https://www.douyin.com/video/88'],
+    ['xiaohongshu', '5d7fcb4500000001000190be', 'https://www.xiaohongshu.com/user/profile/5d7fcb4500000001000190be', 5, 'https://www.xiaohongshu.com/explore/88'],
+  ] as const)('keeps verified owner comments separate on %s', async (platform, ownerId, profile, type, url) => {
+    const { cfg, store, adapter: base, sends } = setup();
+    const settings = cfg.platforms[platform];
+    const focus = { ...cfg.focus, enabled: true, account: profile, maxDailyActions: 0, autoReplyNewComments: true };
+    if (platform === 'bilibili') cfg.focus = focus;
+    else settings.focus = focus;
+    settings.enabled = true;
+    Object.assign(settings.posting, { enabled: true, allowTopLevelComments: true, minIntervalSec: 0, maxDailyComments: 1, maxDailyReplies: 0 });
+    const adapter: SocialPlatform = { ...base, id: platform, normalizeTarget: raw => raw as CommentTarget };
+    const service = new SocialService(cfg, store, new Map([[platform, adapter]]));
+    await service.connect(platform);
+    store.saveFocusBinding({ platform, accountId: '42', ownerId, input: profile, name: '主人', method: 'uid' });
+    store.saveFocusWorks([{ platform, accountId: '42', ownerId,
+      video: { id: '88', aid: '88', ownerId, title: '雨后散步', url, updatedAt: new Date().toISOString() } }]);
+    const ordinary = { oid: '99', type, root: '100', parent: '101' };
+    store.rememberComment({ id: '101', authorId: '7', author: '访客', text: '你好', target: ordinary });
+    await expect(service.publish({ platform, requestId: 'ordinary', target: ordinary, text: '光线和节奏都刚刚好。' }))
+      .resolves.toMatchObject({ status: 'sent' });
+    const top = { oid: '88', type, root: '0', parent: '0' };
+    const post = { platform, requestId: 'owner-top', target: top, text: '雨后这段光线真柔和。' };
+    await expect(service.publish(post)).resolves.toMatchObject({ status: 'sent', focusOwnerId: ownerId });
+    await expect(service.publish({ ...post, requestId: 'owner-top-repeat' })).rejects.toThrow('已有发送记录');
+    store.addInbox({
+      id: 'owner-reply', platform, accountId: '42', focusOwnerId: ownerId, ownerAutoReply: true,
+      notificationType: 'focus-comment', authorId: '7', author: '访客', text: '这是哪里？',
+      target: { ...top, root: '200', parent: '201' }, occurredAt: Date.now() / 1000, status: 'pending',
+    });
+    await expect(service.publish({ platform, inboxId: 'owner-reply', text: '我也想知道是哪条小路。' }))
+      .resolves.toMatchObject({ status: 'sent', focusOwnerId: ownerId });
+    expect(service.status().platforms[0].publishing).toMatchObject({
+      dailyUsed: 1, notificationUsed: 0, ownerCommentsToday: 2, ownerRepliesToday: 1,
+      ownerReplyDailyLimit: null, ownerReplyPerPersonLimit: null,
+    });
+    expect(sends()).toBe(3);
+  });
+
+  it('verifies the author and comment target of a Bilibili image dynamic before using the owner channel', async () => {
+    const x = setup();
+    x.cfg.focus.enabled = true;
+    x.cfg.focus.account = '7';
+    x.cfg.platforms.bilibili.posting.minIntervalSec = 0;
+    x.cfg.platforms.bilibili.posting.maxDailyComments = 0;
+    const dynamic = { oid: '188', type: 17, root: '0', parent: '0' };
+    const input = { platform: 'bilibili', requestId: 'image-dynamic', target: dynamic, text: '雨后这段光线真柔和。' };
+    const post = {
+      id: '88', author: '作者', publishedAt: 1, type: 'DYNAMIC_TYPE_DRAW',
+      text: '雨后', title: '雨后', url: 'https://t.bilibili.com/88', target: dynamic, imageCount: 2,
+    };
+    x.store.rememberDynamics('42', [{ ...post, authorId: '8' }]);
+    await expect(x.s.publish(input)).rejects.toThrow('普通每日发布上限');
+    x.store.rememberDynamics('42', [{ ...post, authorId: '7' }]);
+    await expect(x.s.publish(input)).resolves.toMatchObject({ status: 'sent', focusOwnerId: '7' });
+  });
+
   it('does not let old-account messages starve the active inbox', async () => {
     const x = setup();
     await x.s.connect('bilibili');
@@ -146,6 +229,7 @@ describe('social service', () => {
     };
     const input = { platform: 'bilibili', requestId: 'retry', text: '你好', target };
     expect((await x.s.publish(input)).status).toBe('rejected');
+    await expect(x.s.publish({ ...input, text: '改过的草稿' })).rejects.toThrow('retryRejected=true');
     x.adapter.send = async () => '567';
     expect((await x.s.publish({ ...input, retryRejected: true })).status).toBe('sent');
     expect(x.store.outbox().map((r) => r.status)).toEqual(['rejected', 'sent']);
@@ -378,7 +462,12 @@ it('rechecks recent accepted comments after moderation changes without resending
     platformState: 17,
   });
   await x.s.verifyRecent();
-  expect(x.store.getSend(r.id)?.visibility?.status).toBe('self-only');
+  expect(x.store.getSend(r.id)?.visibility?.status).toBe('unconfirmed');
+  const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.parse(r.createdAt) + 6 * 60000);
+  try {
+    await x.s.verifyRecent();
+    expect(x.store.getSend(r.id)?.visibility?.status).toBe('self-only');
+  } finally { clock.mockRestore(); }
   expect(x.sends()).toBe(1);
 });
 
@@ -561,7 +650,7 @@ it('separates notification budgets, skips a capped person before waking, and res
   }
 });
 
-it('shares focus budgets across new works and thread replies without bypassing person limits', async () => {
+it('allows verified focus opportunities when the old focus participation cap is exhausted', async () => {
   const x = setup();
   x.cfg.focus.enabled = true;
   x.cfg.focus.account = '7';
@@ -588,8 +677,8 @@ it('shares focus budgets across new works and thread replies without bypassing p
     ).toBe('sent');
   await expect(
     x.s.publish({ platform: 'bilibili', inboxId: 'focus2', text: '喜欢这个配色' }),
-  ).rejects.toThrow(/特别关注参与额度/);
-  expect(x.sends()).toBe(2);
+  ).resolves.toMatchObject({ status: 'sent' });
+  expect(x.sends()).toBe(3);
 });
 it('blocks obsolete focus opportunities after disabling or rebinding, but preserves old receipts', async () => {
   const x = setup();
@@ -627,7 +716,31 @@ it('blocks obsolete focus opportunities after disabling or rebinding, but preser
   ).toBe('sent');
   expect(x.sends()).toBe(1);
 });
-it('still caps focused replies to the same person at five a day', async () => {
+it('raises only the bound Bilibili owner notification cap on other works', async () => {
+  const x = setup();
+  x.cfg.focus.enabled = true;
+  x.cfg.focus.account = '77';
+  x.cfg.focus.outsideReplyLimit = 6;
+  x.cfg.platforms.bilibili.posting.minIntervalSec = 0;
+  x.cfg.platforms.bilibili.posting.maxDailyComments = 30;
+  x.cfg.platforms.bilibili.posting.maxDailyReplies = 30;
+  for (const authorId of ['77', '78']) {
+    const limit = authorId === '77' ? 6 : 5;
+    for (let n = 0; n <= limit; n++) {
+      const id = authorId + '-' + n;
+      x.store.addInbox({
+        id, platform: 'bilibili', accountId: '42', authorId, author: '同名',
+        text: '讨论', target: { ...target, parent: authorId + n },
+        occurredAt: 1, status: 'pending',
+      });
+      const send = x.s.publish({ platform: 'bilibili', inboxId: id, text: '谢谢分享' });
+      if (n === limit) await expect(send).rejects.toThrow(/上限|五条/);
+      else await expect(send).resolves.toMatchObject({ status: 'sent' });
+    }
+  }
+});
+
+it('does not apply ordinary per-person limits to verified owner comment threads', async () => {
   const x = setup();
   x.cfg.focus.enabled = true;
   x.cfg.focus.account = '7';
@@ -646,17 +759,10 @@ it('still caps focused replies to the same person at five a day', async () => {
       status: 'pending',
       focusOwnerId: '7',
     });
-    if (n < 5)
-      expect(
-        (await x.s.publish({ platform: 'bilibili', inboxId: 'person' + n, text: '谢谢分享' }))
-          .status,
-      ).toBe('sent');
-    else
-      await expect(
-        x.s.publish({ platform: 'bilibili', inboxId: 'person' + n, text: '谢谢分享' }),
-      ).rejects.toThrow(/5|五/);
+    await expect(x.s.publish({ platform: 'bilibili', inboxId: 'person' + n, text: '谢谢分享' }))
+      .resolves.toMatchObject({ status: 'sent' });
   }
-  expect(x.sends()).toBe(5);
+  expect(x.sends()).toBe(6);
 });
 
 it('does not send a focused invitation after the same position already received a normal reply', async () => {
@@ -820,20 +926,20 @@ it('does not create another uncertain send to the same target by changing text a
 
 it('does not interpret another platform status number as Bilibili private visibility', async () => {
   const x = setup();
-  x.cfg.platforms.kuaishou.enabled = true;
-  x.cfg.platforms.kuaishou.posting.enabled = true;
-  const { kuaishouTarget } = await import('../src/platforms/kuaishou.ts');
+  x.cfg.platforms.douyin.enabled = true;
+  x.cfg.platforms.douyin.posting.enabled = true;
+  const { douyinTarget } = await import('../src/platforms/douyin.ts');
   const adapter = {
     ...x.adapter,
-    id: 'kuaishou',
-    normalizeTarget: kuaishouTarget,
+    id: 'douyin',
+    normalizeTarget: douyinTarget,
     send: async () => ({ receiptId: '1188819999999', platformState: 17 }),
   };
-  const s = new SocialService(x.cfg, x.store, new Map([['kuaishou', adapter]]));
+  const s = new SocialService(x.cfg, x.store, new Map([['douyin', adapter]]));
   const r = await s.publish({
-    platform: 'kuaishou',
+    platform: 'douyin',
     requestId: 'native-status',
-    target: { oid: '3xtestphoto12345', type: 3, root: '0', parent: '0' },
+    target: { oid: '7212345678901234567', type: 2, root: '0', parent: '0' },
     text: '喜欢这个细节',
   });
   expect(r.platformState).toBe(17);

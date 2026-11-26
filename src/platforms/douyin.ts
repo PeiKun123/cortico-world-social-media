@@ -1,7 +1,7 @@
 import { hideOwnedBrowserWindows } from './windows-browser.ts';
 import { douyinPageWaitMs, douyinOperationBudgetMs } from '../config.ts';
 import { readDouyinGroup, sendDouyinGroup, type GroupBinding } from './douyin-chat.ts';
-import { browserCacheArgs, clearNetworkCache } from '../resources.ts';
+import { browserCacheArgs, clearNetworkCache, officialCommentImage, readCommentImages } from '../resources.ts';
 import { MAX_VIDEO_FRAMES } from '../resource-policy.ts';
 import { parseFocusAccount } from '../focus.ts';
 import { existsSync } from 'node:fs';
@@ -103,6 +103,23 @@ export function mapDouyinVideo(v: Json): Video {
     parts: [],
   };
 }
+const DOUYIN_COMMENT_IMG = /(?:^|\.)(?:douyinpic\.com|byteimg\.com)$/i;
+function douyinCommentPictures(row: Json): string[] {
+  const pictures = row.image_list ?? row.images;
+  return Array.isArray(pictures) ? pictures.slice(0, 12).flatMap(image => {
+    const variants = [image?.origin_url, image?.large_url, image?.thumb_url, image].flatMap(
+      entry => Array.isArray(entry?.url_list) ? entry.url_list.slice(0, 8) : [],
+    );
+    for (const value of variants) {
+      const url = officialCommentImage(value, DOUYIN_COMMENT_IMG);
+      if (url) return [url];
+    }
+    return [];
+  }) : [];
+}
+function commentPictureKey(target: CommentTarget) {
+  return [target.oid, target.root, target.parent].join(':');
+}
 export function mapDouyinComment(v: Json, videoId: string, root?: string): PublicComment {
   const id = numericId(v.cid);
   return {
@@ -111,6 +128,7 @@ export function mapDouyinComment(v: Json, videoId: string, root?: string): Publi
     authorId: validSecUid(v.user?.sec_uid) ? v.user.sec_uid : numericId(v.user?.uid),
     author: String(v.user?.nickname ?? '').slice(0, 80),
     text: String(v.text ?? '').slice(0, 2000),
+    imageCount: douyinCommentPictures(v).length || undefined,
     target: {
       oid: numericId(videoId),
       type: DOUYIN_VIDEO_TYPE,
@@ -154,6 +172,7 @@ interface Capture {
   creators: Map<string, Account & { handle: string }>;
   videos: Map<string, Video>;
   galleryUrls: Map<string, Array<string | null>>;
+  commentPictures: Map<string, string[]>;
   rows: PublicComment[];
   pages: Array<{ cursor: string; next: string; more: boolean; root: string }>;
   self?: Account;
@@ -164,6 +183,10 @@ export interface DouyinVerification {
   at: string;
   pageTitle: string;
   browserMode: 'visible' | 'compatible' | 'windowless';
+}
+export interface DouyinVerificationCheckpoint {
+  url: string;
+  verification: DouyinVerification;
 }
 export interface DouyinFailure {
   at: string;
@@ -223,7 +246,7 @@ export class DouyinPlatform implements SocialPlatform {
   private verification?: DouyinVerification;
   private verificationReturnUrl?: string;
   private requestedPages = new WeakMap<Page, string>();
-  private detail = '实验接入：视频与评论通过独立Edge读取；发评需登录验收。';
+  private detail = '视频与评论通过独立 Edge 读取。发评需登录并开启权限。';
   constructor(
     private profileDir: string,
     private executable: () => string,
@@ -236,6 +259,10 @@ export class DouyinPlatform implements SocialPlatform {
     private compatibilityWindow: () => boolean = () => false,
     private pageWaitSeconds: () => number = () => 45,
     private hideCompatibilityWindow: () => boolean = () => false,
+    private verificationCheckpoint?: {
+      load(): DouyinVerificationCheckpoint | undefined;
+      save(value?: DouyinVerificationCheckpoint): void;
+    },
   ) {}
   private timeoutMs() {
     return douyinPageWaitMs(this.pageWaitSeconds());
@@ -285,6 +312,9 @@ export class DouyinPlatform implements SocialPlatform {
       },
     };
   }
+  get paused() {
+    return this.verification?.paused ? '抖音官网等待人工验证。' : undefined;
+  }
   // Only explicit local checks or a changed browser mode resume after a challenge.
   resumeVerificationChecks() {
     if (this.verification) this.verification.paused = false;
@@ -292,7 +322,14 @@ export class DouyinPlatform implements SocialPlatform {
   private verificationUrl(input?: string) {
     try {
       const u = new URL(input ?? ORIGIN + '/jingxuan');
-      if (u.origin !== ORIGIN) return ORIGIN + '/jingxuan';
+      if (u.origin !== ORIGIN || u.username || u.password) return ORIGIN + '/jingxuan';
+      const search = /^\/search\/([^/]{1,1500})$/.exec(u.pathname);
+      if (search) {
+        const query = decodeURIComponent(search[1]).trim();
+        const type = u.searchParams.get('type');
+        if (query && query.length <= 120 && !/[\u0000-\u001f]/.test(query) && (type === 'video' || type === 'user'))
+          return ORIGIN + '/search/' + encodeURIComponent(query) + '?type=' + type;
+      }
       if (u.pathname === '/jingxuan' || u.pathname === '/') {
         const id = u.searchParams.get('modal_id');
         return id && /^[1-9][0-9]{0,29}$/.test(id) ? playerUrl(id) : ORIGIN + u.pathname;
@@ -309,6 +346,11 @@ export class DouyinPlatform implements SocialPlatform {
   }
   reset() {
     this.stopped = false;
+    if (this.verification) return;
+    const saved = this.verificationCheckpoint?.load();
+    if (!saved?.verification?.paused || typeof saved.url !== 'string') return;
+    this.verification = { ...saved.verification };
+    this.verificationReturnUrl = this.verificationUrl(saved.url);
   }
   private serial<T>(action: () => Promise<T>): Promise<T> {
     const result = this.queue.then(action, action);
@@ -426,6 +468,7 @@ export class DouyinPlatform implements SocialPlatform {
       creators: new Map(),
       videos: new Map(),
       galleryUrls: new Map(),
+      commentPictures: new Map(),
       rows: [],
       pages: [],
       pending: new Set(),
@@ -512,6 +555,8 @@ export class DouyinPlatform implements SocialPlatform {
       try {
         const entry = pendingRows[index],
           c = mapDouyinComment(entry.row, pageId, entry.root);
+        const pictures = douyinCommentPictures(entry.row);
+        if (pictures.length) data.commentPictures.set(commentPictureKey(c.target), pictures);
         const old = data.rows.findIndex((r) => r.id === c.id);
         if (old < 0) data.rows.push(c);
         else data.rows[old] = c;
@@ -541,6 +586,7 @@ export class DouyinPlatform implements SocialPlatform {
         browserMode: this.status().browserMode as DouyinVerification['browserMode'],
       };
       this.verificationReturnUrl = this.verificationUrl(this.requestedPages.get(page));
+      this.verificationCheckpoint?.save({ verification: this.verification, url: this.verificationReturnUrl });
       throw new PlatformError(
         '抖音页面要求人工验证，同类自动访问已暂停；这不代表账号掉线。请在小鲸鱼爱冲浪“配置 → 抖音”点击“处理人工验证”，完成官网提示后点击“完成登录并检查后台”。若可见窗口没有验证而后台仍被拦，可在连接选项主动选择兼容窗口模式，再检查推荐流；登录成功不能保证后台可用，不要反复重试或承诺已经恢复。',
         'auth',
@@ -623,6 +669,7 @@ export class DouyinPlatform implements SocialPlatform {
           data.creators.clear();
           data.videos.clear();
           data.galleryUrls.clear();
+          data.commentPictures.clear();
           data.rows = [];
           data.pages = [];
           data.self = undefined;
@@ -635,6 +682,7 @@ export class DouyinPlatform implements SocialPlatform {
         const result = await action(p, data);
         combined.throwIfAborted();
         if (kind === 'main' && this.verificationReturnUrl === this.verificationUrl(url)) {
+          this.verificationCheckpoint?.save();
           this.verification = undefined;
           this.verificationReturnUrl = undefined;
         }
@@ -849,7 +897,7 @@ export class DouyinPlatform implements SocialPlatform {
   }
   async search(query: string, page = 1, signal?: AbortSignal) {
     if (!query.trim() || query.length > 120) throw new PlatformError('检索词应为1–120字。');
-    if (page !== 1) throw new PlatformError('抖音实验接入只读取首屏搜索结果，不会伪造翻页。');
+    if (page !== 1) throw new PlatformError('抖音搜索目前支持读取首屏。');
     return this.visit(
       ORIGIN + '/search/' + encodeURIComponent(query) + '?type=video',
       async (p, data) => {
@@ -1274,7 +1322,11 @@ export class DouyinPlatform implements SocialPlatform {
         const author = [...e.querySelectorAll<HTMLAnchorElement>('a[href*="/user/"]')].find(
           (n) => n.closest('[data-e2e="comment-item"]') === e && n.innerText.trim(),
         );
-        if (!cid || !body || !author) return [];
+        if (!cid || !author) return [];
+        const images = [...e.querySelectorAll<HTMLImageElement>(
+          '[data-e2e="comment-image"] img, img[data-e2e="comment-image"], .comment-image img, img.comment-image, .comment-pictures img',
+        )].filter(img => img.closest('[data-e2e="comment-item"]') === e)
+          .slice(0, 12).map(img => img.currentSrc || img.src);
         let thread: Element = e;
         let ancestor = e.parentElement?.closest('[data-e2e="comment-item"]');
         while (ancestor) {
@@ -1285,9 +1337,9 @@ export class DouyinPlatform implements SocialPlatform {
           .find((n) => n.closest('[data-e2e="comment-item"]') === thread)
           ?.id.match(/^tooltip_(\d+)$/)?.[1];
         if (!root) return [];
-        const copy = body.cloneNode(true) as HTMLElement;
-        for (const badge of copy.querySelectorAll('.comment-item-tag,.semi-tag')) badge.remove();
-        for (const image of copy.querySelectorAll('img[alt]'))
+        const copy = body?.cloneNode(true) as HTMLElement | undefined;
+        for (const badge of copy?.querySelectorAll('.comment-item-tag,.semi-tag') ?? []) badge.remove();
+        for (const image of copy?.querySelectorAll('img[alt]') ?? [])
           image.replaceWith(document.createTextNode(image.getAttribute('alt') ?? ''));
         const url = new URL(author.href),
           sec =
@@ -1298,7 +1350,8 @@ export class DouyinPlatform implements SocialPlatform {
           {
             cid,
             root,
-            text: (copy.textContent ?? '').trim().slice(0, 2000),
+            text: (copy?.textContent ?? '').trim().slice(0, 2000),
+            images,
             author: author.innerText.trim().slice(0, 80),
             sec,
           },
@@ -1306,7 +1359,15 @@ export class DouyinPlatform implements SocialPlatform {
       }),
     );
     for (const row of rows) {
-      if (!row.text) continue;
+      const target = { oid: id, type: DOUYIN_VIDEO_TYPE, root: numericId(row.root), parent: numericId(row.cid) };
+      const key = commentPictureKey(target);
+      const images = row.images.flatMap(image => {
+        const url = officialCommentImage(image, DOUYIN_COMMENT_IMG);
+        return url ? [url] : [];
+      });
+      if (!data.commentPictures.has(key) && images.length) data.commentPictures.set(key, images);
+      const imageCount = data.commentPictures.get(key)?.length;
+      if (!row.text && !imageCount) continue;
       const index = data.rows.findIndex((c) => c.id === row.cid);
       const comment: PublicComment = {
         id: numericId(row.cid),
@@ -1318,12 +1379,8 @@ export class DouyinPlatform implements SocialPlatform {
             : undefined,
         author: row.author,
         text: row.text,
-        target: {
-          oid: id,
-          type: DOUYIN_VIDEO_TYPE,
-          root: numericId(row.root),
-          parent: numericId(row.cid),
-        },
+        imageCount,
+        target,
       };
       if (index < 0) data.rows.push(comment);
       else data.rows[index] = comment;
@@ -1331,7 +1388,7 @@ export class DouyinPlatform implements SocialPlatform {
     data.rows = data.rows.slice(-180);
     return data.rows.some((c) => c.target.oid === id);
   }
-  private async commentArea(p: Page, data: Capture, id: string, refresh = true): Promise<void> {
+  private async commentArea(p: Page, data: Capture, id: string, refresh = true, composingTopLevel = false): Promise<void> {
     this.operationStage = '加载评论区';
     await this.settle(
       p,
@@ -1342,29 +1399,33 @@ export class DouyinPlatform implements SocialPlatform {
     await this.dismiss(p);
     const rows = p.locator('[data-e2e="comment-item"]');
     const visible = async () => {
+      if (composingTopLevel && await p.locator('.comment-input-inner-container:visible').count() === 1) return true;
       await this.pageComments(p, data, id);
       return Boolean(await rows.filter({ visible: true }).count());
     };
     // A panel which is still mounting must not be toggled shut by an impatient second click.
     await this.settle(p, data, visible, 1200);
     for (let attempt = 0; attempt < 2 && !(await visible()); attempt++) {
+      const buttons = p.locator('[data-e2e="feed-comment-icon"]');
+      // The feed behind a work overlay can have an identical button at the same coordinates.
+      const frontButton = () => buttons.evaluateAll(elements => elements.findIndex(el => {
+        const r = el.getBoundingClientRect();
+        const left = Math.max(0, r.left), right = Math.min(innerWidth, r.right);
+        const top = Math.max(0, r.top), bottom = Math.min(innerHeight, r.bottom);
+        if (right <= left || bottom <= top) return false;
+        const front = document.elementFromPoint((left + right) / 2, (top + bottom) / 2);
+        return front !== null && el.contains(front);
+      }));
       const tab = p.getByText('评论', { exact: true }).filter({ visible: true });
-      if ((await tab.count()) === 1) await tab.dispatchEvent('click');
-      else {
-        const buttons = p.locator('[data-e2e="feed-comment-icon"]');
-        for (let i = 0; i < (await buttons.count()); i++) {
-          const button = buttons.nth(i);
-          if (
-            await button.evaluate((e) => {
-              const r = e.getBoundingClientRect();
-              return r.width > 0 && r.height > 0 && r.top < innerHeight && r.bottom > 0;
-            })
-          ) {
-            await button.dispatchEvent('click');
-            break;
-          }
-        }
-      }
+      // Work details often arrive before the player mounts its controls.
+      await this.settle(p, data, async () =>
+        (await visible()) || (await frontButton()) >= 0 || (await tab.count()) === 1,
+      this.timeoutMs());
+      if (await visible()) break;
+      const index = await frontButton();
+      if (index >= 0) await buttons.nth(index).dispatchEvent('click');
+      else if (await tab.count() === 1) await tab.dispatchEvent('click');
+      else break;
       await this.settle(
         p,
         data,
@@ -1379,10 +1440,10 @@ export class DouyinPlatform implements SocialPlatform {
     }
     await Promise.allSettled([...data.pending]);
     await this.pageComments(p, data, id);
-    if (refresh && !data.rows.some((c) => c.target.oid === id) && !(await rows.count())) {
+    if (refresh && !(composingTopLevel && await visible()) && !data.rows.some((c) => c.target.oid === id) && !(await rows.count())) {
       // One read-only refresh, only after the configured loading wait. Never retry a write.
       await p.reload({ waitUntil: 'domcontentloaded', timeout: this.timeoutMs() });
-      await this.commentArea(p, data, id, false);
+      await this.commentArea(p, data, id, false, composingTopLevel);
     }
   }
   private async scrollComments(p: Page, data: Capture, id: string, waitMs: number) {
@@ -1633,6 +1694,20 @@ export class DouyinPlatform implements SocialPlatform {
       signal,
     );
   }
+  async commentImages(raw: CommentTarget, limit: number, signal?: AbortSignal) {
+    const target = douyinTarget(raw);
+    if (target.parent === '0') throw new PlatformError('请指定一个有配图的评论楼层。');
+    return this.visit(playerUrl(target.oid), async (p, data) => {
+      await this.commentArea(p, data, target.oid);
+      await this.revealThread(p, data, target);
+      await this.pageComments(p, data, target.oid);
+      const key = commentPictureKey(target);
+      const urls = data.commentPictures.get(key);
+      const frames = await readCommentImages(urls ?? [], limit, ORIGIN + '/', signal);
+      if (!frames.length) throw new PlatformError('抖音未交付这条评论可读取的配图。');
+      return frames;
+    }, signal);
+  }
   async gallery(video: Video, indices: number[], signal?: AbortSignal) {
     const id = douyinVideoId(video.url);
     if (id !== douyinVideoId(video.id) || video.kind !== 'images')
@@ -1859,7 +1934,7 @@ export class DouyinPlatform implements SocialPlatform {
             await check.close().catch(() => {});
           }
           stage = this.operationStage = '加载评论区';
-          await this.commentArea(p, data, t.oid);
+          await this.commentArea(p, data, t.oid, true, t.root === '0');
           if (t.root !== '0') {
             stage = this.operationStage = '展开指定楼层';
             await this.revealThread(p, data, t);
@@ -1877,10 +1952,10 @@ export class DouyinPlatform implements SocialPlatform {
             await reply.click();
           }
           stage = this.operationStage = '填写评论';
-          const editors = p.locator('[contenteditable="true"]:visible');
+          const editors = p.locator('[contenteditable="true"]:visible, .comment-input-inner-container textarea:visible, .comment-input-inner-container [contenteditable="plaintext-only"]:visible');
           const placeholder = p
             .locator('.comment-input-inner-container')
-            .getByText(/^留下你的(?:精彩)?评论吧$/u)
+            .getByText(/^(?:留下你的(?:精彩)?评论吧|说点什么|写(?:下)?评论)[…。.！!]*$/u)
             .filter({ visible: true });
           await editors.or(placeholder).first().waitFor({ state: 'visible' });
           if (!(await editors.count())) {
@@ -1901,7 +1976,7 @@ export class DouyinPlatform implements SocialPlatform {
             send = container.getByText('发送', { exact: true }).filter({ visible: true });
           }
           if ((await send.count()) === 0) {
-            const commentBox = p.locator('.comment-input-inner-container').filter({ has: editor });
+            const commentBox = editor.locator('xpath=ancestor::*[contains(concat(" ", normalize-space(@class), " "), " comment-input-inner-container ")][1]');
             send = commentBox
               .locator('.commentInput-right-ct span')
               .filter({ has: p.locator('svg path[fill="#FE2C55"]') })

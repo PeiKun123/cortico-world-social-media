@@ -1,4 +1,5 @@
-import { expressionSettings } from './expression.ts';
+import { POST_PLATFORMS, PUBLIC_POST_NAMES, isPublicPostPlatform, type PublicPostPlatform } from '../public-post-policy.ts';
+import { expressionSettings, type PublicPlatformSettings } from './expression.ts';
 import type { DouyinFailure, DouyinVerification } from '../platforms/douyin.ts';
 import type { GroupChats } from '../group-chat.ts';
 import type { DynamicPost } from '../dynamic-publishing.ts';
@@ -11,7 +12,7 @@ import {
   type InteractionFilter,
 } from '../interactions.ts';
 import {
-  PUBLIC_POST_TRIAL_ENABLED,
+  ROAMING_PLATFORMS,
   ROAMING_PRESETS,
   roamingConfig,
   SOCIALMEDIA_CONFIG_GROUP,
@@ -36,6 +37,7 @@ interface Snapshot {
   groupChat?: ReturnType<GroupChats['status']> & { error?: string };
   resources?: {
     todayCalls: number;
+    byPlatform?: Record<string, number>;
     maxDailyVisualCalls: number;
     unlimitedDailyVisualCalls?: boolean;
     publishedBytes: number;
@@ -51,7 +53,7 @@ interface Snapshot {
       maxArchiveBytes: number;
     };
   };
-  kuaishou?: { running: boolean; loginOpen: boolean; detail: string };
+  publicPlatforms?: PublicPlatformSettings;
   focus?: FocusSnapshot;
   focusPlatforms?: Record<string, FocusSnapshot>;
   config?: SocialMediaConfigSection;
@@ -78,6 +80,8 @@ interface Snapshot {
     };
   };
   roaming?: {
+    idleSeconds?: number;
+    idle?: boolean;
     enabled: boolean;
     usedToday: number;
     limits: RoamingConfig;
@@ -95,6 +99,7 @@ interface Snapshot {
     account?: { id: string; name: string };
     error?: string;
     lastPollAt?: string;
+    publishing?: { ownerCommentsToday: number | null };
   }>;
   inbox: InboxItem[];
   outbox: SendRecord[];
@@ -144,7 +149,7 @@ export function connectionEvidence(state: Snapshot, platform: string, read?: Com
         ? stamp(proof.at) + ' · ' + proof.commentCount + '条评论'
         : received.length
           ? '依据当前账号收到的评论通知，当前连接仍以检查结果为准。'
-          : '抖音、快手可填作品链接测试；B站可先同步评论通知。',
+          : '抖音可填作品链接测试；B站可先同步评论通知。',
     },
     {
       key: 'comment',
@@ -258,8 +263,7 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
     return box;
   }
   function loginGuide(id: string) {
-    const name = id === 'bilibili' ? 'B站' : id === 'douyin' ? '抖音' : '快手',
-      box = fold('登录、验证码与验证结果', 'sm-subsection sm-setup-guide'),
+    const box = fold('登录、验证码与验证结果', 'sm-subsection sm-setup-guide'),
       list = el('ol');
     const steps =
       id === 'bilibili'
@@ -270,13 +274,9 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
             '动态发布和主动@的开关只是授权。实际发送后才有回执；公开可见与@通知送达还需单独核对。',
           ]
         : [
-            '点击“打开' + name + '登录窗口”，在独立Edge中登录；日常浏览器的登录与这里独立。',
-            '在官网手动完成滑块、验证码或安全检查，再回此页点“完成' +
-              name +
-              '登录”；它只核对账号，不代表刷视频、发评都通过。',
-            id === 'douyin'
-              ? '在“读取与连接检查”检查推荐流，或填作品链接测试评论。后台遇到验证不一定是掉线；Windows可主动使用连接选项里的兼容窗口模式，仍需完成官网验证。'
-              : '在“读取与连接检查”填普通视频链接测试评论；图文自动发评与群聊尚未支持。',
+            '点击“打开登录／验证窗口”，在独立 Edge 登录。',
+            '在官网手动完成验证后，回到这里点“完成登录并检查后台”。',
+            '在“读取与连接检查”检查推荐流，或填作品链接测试评论。后台遇到验证时可在连接选项中使用兼容窗口模式。',
             '读取检查不会公开发送。正常发评后查看回执；结果未知时不要重复提交，先去原作品或其他账号核对。',
           ];
     for (const step of steps) list.append(el('li', step));
@@ -306,19 +306,33 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
     return details;
   }
   const header = el('header', undefined, 'sm-tv-heading');
-  header.append(
-    el('h2', '小鲸鱼爱冲浪'),
-    el(
-      'p',
-      settingsMode ? '平台与画面设置' : '互动记录',
-      'sm-muted',
-    ),
-  );
-  const capabilities = fold('平台能力与限制 · B站 / 抖音 / 快手', 'sm-subsection sm-capabilities');
+  const headingText = el('div');
+  headingText.append(el('h2', '小鲸鱼爱冲浪'), el('p', settingsMode ? '平台与画面设置' : '互动记录', 'sm-muted'));
+  const idleClock = el('div', undefined, 'sm-idle-clock');
+  const clockLabel = el('span', '本轮空闲时长', 'sm-clock-label');
+  const clockValue = el('strong', '等待同步', 'sm-clock-value');
+  clockValue.setAttribute('role', 'timer');
+  clockValue.setAttribute('aria-label', '本轮空闲时长');
+  idleClock.append(clockLabel, clockValue);
+  header.append(headingText, idleClock);
+  let idleSample: { seconds: number; at: number; idle: boolean } | undefined;
+  function updateIdleClock() {
+    const age = idleSample ? Math.max(0, Math.floor((Date.now() - idleSample.at) / 1000)) : 0;
+    const state = !idleSample || age > 30 ? 'waiting' : idleSample.idle ? 'idle' : 'busy';
+    idleClock.dataset.state = state;
+    const seconds = (idleSample?.seconds ?? 0) + age;
+    const display = state === 'idle'
+      ? [Math.floor(seconds / 3600), Math.floor(seconds / 60) % 60, seconds % 60]
+        .map(v => String(v).padStart(2, '0')).join(':')
+      : state === 'busy' ? '忙碌中' : '等待同步';
+    if (clockValue.textContent !== display) clockValue.textContent = display;
+  }
+  ctx.interval(updateIdleClock, 1000);
+  const capabilities = fold('平台能力与限制 · B站 / 抖音 / 小红书 / 贴吧', 'sm-subsection sm-capabilities');
   capabilities.append(
     el(
       'p',
-      '三个平台的能力各不相同。展开查看当前支持范围；开启平台或发布权限不会解锁尚未接入的功能。',
+      '各平台的能力不同。展开查看当前支持范围；开启平台或发布权限不会解锁尚未接入的功能。',
       'sm-muted',
     ),
   );
@@ -336,7 +350,7 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
     ],
     [
       'douyin',
-      '抖音 · 实验',
+      '抖音',
       [
         [
           '可用',
@@ -345,28 +359,14 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
         ['边界', '完整字幕、全站回复及@通知未接入。群聊须单独启用并核对目标；不是监听所有群。'],
       ],
     ],
-    [
-      'kuaishou',
-      '快手 · 实验',
+    ...(['xiaohongshu', 'tieba'] as const).map(id => [
+      id,
+      id === 'xiaohongshu' ? '小红书' : '百度贴吧 · 实验',
       [
-        [
-          '可用',
-          '普通视频详情与评论；主评论通过官网原生评论框发送；首屏搜索、推荐候选、已核实视频的特别关注。',
-        ],
-        [
-          '楼中楼',
-          '可以尝试精确回复，但仍走实验接口，他人可见性尚未完成验收，不能按主评论效果保证。',
-        ],
-        [
-          '未支持',
-          '普通群聊、图文自动发评、画面采样、字幕和全站通知。准确图文链接有时可单独读评论，不代表能发评。',
-        ],
-        [
-          '作品检查',
-          '官网作品列表可能不完整；“作品检查未完成”不等于没有作品或没有新评论，也不能保证覆盖所有图文。',
-        ],
+        ['可用', '登录绑定后可自动刷帖、浏览主人作品，以及读取官网可见的正文和评论。'],
+        ['边界', '部分作品或功能会受登录、验证和官网页面影响。评论回复需单独授权。'],
       ],
-    ],
+    ] as const),
   ] as const) {
     const section = el('article', undefined, 'sm-platform sm-capability-platform');
     section.dataset.platform = id;
@@ -378,7 +378,7 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
   capabilities.append(
     el(
       'p',
-      '使用须知：各平台分别登录、设置特别关注并授权发评。新评论采用有限范围轮询，不是全量实时推送；返回评论编号只代表平台受理，不保证其他账号可见。浏览器后台模式仍会占用资源；抖音默认任务结束立即释放，快手空闲后关闭，登录资料保留。',
+      '使用须知：各平台分别登录、设置特别关注并授权发评。新评论采用有限范围轮询，不是全量实时推送；返回评论编号只代表平台受理，不保证其他账号可见。浏览器后台模式仍会占用资源；抖音默认任务结束立即释放，登录资料保留。',
       'sm-muted',
     ),
   );
@@ -540,12 +540,12 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
       '总开关控制是否发起闲逛；活跃度和等待时间只在各平台设置。新消息到来时收好当前一步，再回归聊天。',
     ),
   );
-  function browserPlatform(id: 'douyin' | 'kuaishou', title: string, description: string) {
+  function browserPlatform(id: 'douyin', title: string, description: string) {
     const section = el('section', undefined, 'sm-config-section sm-platform-card');
     section.dataset.platform = id;
     section.append(el('h3', title + ' · 账号与交流'), el('p', description, 'sm-muted'));
     const enabled = toggle(
-      '启用' + title + '（实验）',
+      '启用' + title,
       'worlds.socialmedia.platforms.' + id + '.enabled',
     );
     const posting = toggle(
@@ -658,13 +658,11 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
       verificationNote,
       hidingNote,
       buttons,
-      usageChecks(id),
-      checks,
       failureBox,
-      loginGuide(id),
     );
     return {
       section,
+      checks,
       status,
       input,
       enabled,
@@ -726,35 +724,17 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
     '抖音',
     '视频、官网可访问的图文与评论；支持本地指定群监听和发言。全站通知与完整字幕未接入。',
   );
-  const ksControls = browserPlatform(
-    'kuaishou',
-    '快手',
-    '普通视频评论区可发主评论；楼中楼为实验功能，他人可见性未完成验收。群聊未接入，图文不支持自动发评；作品列表可能不完整。',
-  );
   const douyinSection = dyControls.section;
-  const kuaishouSection = ksControls.section;
-  const kuaishouFocusSection = el('details', undefined, 'sm-subsection sm-platform-focus');
-  kuaishouFocusSection.append(
-    el('summary', '快手特别关注'),
-    el(
-      'p',
-      '填写主人完整主页或快手号，搜索后核实公开主页上的号码。仅监测官网能返回并核实的普通视频，不支持图文自动回应；“作品检查未完成”不代表账号没有作品或没有新评论。',
-      'sm-muted',
-    ),
-  );
-  const kuaishouFocusStatus = el('p', '', 'sm-muted');
-  kuaishouFocusSection.append(kuaishouFocusStatus);
   const settings = el('div', undefined, 'sm-settings');
   accountSection.append(
     toolbar,
     connectionResults,
     loginBox,
-    usageChecks('bilibili'),
-    loginGuide('bilibili'),
+
   );
   const extraInputs = new Map<string, HTMLInputElement | HTMLSelectElement>();
   const dirtyExtras = new Set<string>();
-  type SaveScope = 'bilibili' | 'douyin' | 'kuaishou' | 'resources';
+  type SaveScope = 'bilibili' | 'douyin' | PublicPostPlatform | 'resources';
   const saveHints = new Map<string, HTMLElement>();
   function settingScope(key: string): SaveScope {
     if (key.startsWith('worlds.socialmedia.media.')) return 'resources';
@@ -763,26 +743,26 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
       key.startsWith('worlds.socialmedia.douyinBrowser.')
     )
       return 'douyin';
-    if (
-      key.startsWith('worlds.socialmedia.platforms.kuaishou.') ||
-      key.startsWith('worlds.socialmedia.kuaishouBrowser.')
-    )
-      return 'kuaishou';
-    return 'bilibili';
+    const platform = key.split('.')[3];
+    return isPublicPostPlatform(platform) ? platform : 'bilibili';
   }
   function refreshSaveHints() {
     for (const [id, hint] of saveHints) {
       const n = [...dirtyExtras].filter((k) => settingScope(k) === id).length;
+      if (hint.parentElement) hint.parentElement.dataset.dirty = String(n > 0);
       hint.textContent = n ? n + '项修改待保存' : '无待保存修改';
     }
   }
 
+  const ownerReplySection = el('section', undefined, 'sm-subsection');
+  ownerReplySection.append(el('h4', '主人 @ 我的回复额度'),
+    el('p', '按 B 站特别关注绑定的账号识别。主人在别人作品下 @ 我或回复我时共用此限额；普通用户每人每天最多 5 条。主人自己作品的评论区单独计数。', 'sm-muted'));
   const extraSection = el('details', undefined, 'sm-subsection sm-platform-limits');
   extraSection.append(
     el('summary', '回应与发布额度'),
     el(
       'p',
-      '主人评论自动回应单独计账，不占这里的普通额度；普通通知与闲逛分别计数，共用普通发布上限，普通渠道同一人每天最多五条。',
+      '主人评论自动回应单独计账，不占这里的普通额度；普通通知与闲逛分别计数，共用普通发布上限，普通渠道同一人每天最多五条（B站绑定主人在其他作品下的通知可单独调高）。',
       'sm-muted',
     ),
   );
@@ -922,7 +902,6 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
   resourceSection.append(maintenance);
   const advanced = fold('连接选项', 'sm-subsection sm-platform-advanced');
   const douyinLimits = fold('发言额度', 'sm-subsection sm-platform-limits');
-  const kuaishouLimits = fold('发言额度', 'sm-subsection sm-platform-limits');
   const douyinAdvanced = fold('连接选项', 'sm-subsection sm-platform-advanced');
   const groupSection = fold('群聊监听', 'sm-subsection sm-group-settings');
   const groupAdvanced = fold('高级设置 · 群聊频率', 'sm-subsection sm-group-advanced');
@@ -948,7 +927,6 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
     },
     groupSection,
   );
-  const kuaishouAdvanced = fold('连接选项', 'sm-subsection sm-platform-advanced');
   const bindingActions = el('div');
   groupSection.append(bindingActions);
   let bindingDigest = '';
@@ -1041,10 +1019,8 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
   );
   const biliFocusTiming = fold('检查范围与频率');
   const douyinFocusTiming = fold('检查范围与频率');
-  const kuaishouFocusTiming = fold('检查范围与频率');
   focusSection.append(biliFocusTiming);
   douyinFocusSection.append(douyinFocusTiming);
-  kuaishouFocusSection.append(kuaishouFocusTiming);
   const isFocusPrimary = (path: string) =>
     /\.(enabled|account|autoReplyNewComments|replyExistingComments)$/.test(path);
   const roamCards = new Map<string, HTMLDetailsElement>();
@@ -1053,7 +1029,7 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
   for (const [id, title] of [
     ['bilibili', 'B站'],
     ['douyin', '抖音'],
-    ['kuaishou', '快手'],
+    ...POST_PLATFORMS.map(id => [id, PUBLIC_POST_NAMES[id]] as const),
   ] as const) {
     const card = fold('闲逛与活跃度', 'sm-subsection sm-platform-roaming'),
       status = el('p', '', 'sm-muted');
@@ -1191,21 +1167,40 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
       option.setAttribute('aria-pressed', String(input.value === String(control.choices[index][0])));
     });
   }
+  const visualCards = new Map(ROAMING_PLATFORMS.map(id => [id, fold('本站画面设置', 'sm-subsection')]));
+  const learningCards = new Map(ROAMING_PLATFORMS.map(id => [
+    id, fold('语料学习偏好', 'sm-subsection'),
+  ]));
+  const learningUsage = new Map(ROAMING_PLATFORMS.map(id => {
+    const status = el('p', '', 'sm-muted');
+    visualCards.get(id)!.append(status);
+    return [id, status] as const;
+  }));
+  const platformOptionLabels: Record<string, string> = {
+    inherit: '沿用全局设置', bounded: '本站独立限额', unlimited: '本站每日不限次数',
+    off: '关闭', light: '低 · 偶尔参考', medium: '中 · 日常参考', strong: '高 · 优先参考',
+  };
   const excluded = new Set([
-    'worlds.socialmedia.platforms.kuaishou.enabled',
-    'worlds.socialmedia.platforms.kuaishou.posting.enabled',
     'worlds.socialmedia.platforms.douyin.enabled',
     'worlds.socialmedia.platforms.douyin.posting.enabled',
     'worlds.socialmedia.platforms.bilibili.enabled',
     'worlds.socialmedia.platforms.bilibili.monitor.enabled',
     'worlds.socialmedia.platforms.bilibili.posting.enabled',
+    'worlds.socialmedia.focus.maxDailyActions',
+    'worlds.socialmedia.platforms.douyin.focus.maxDailyActions',
   ]);
   for (const [path, prop] of Object.entries(SOCIALMEDIA_CONFIG_GROUP.schema.properties)) {
-    if (path.startsWith('worlds.socialmedia.roaming.') || excluded.has(path)) continue;
+    if (path.startsWith('worlds.socialmedia.roaming.') || path.startsWith('worlds.socialmedia.experiments.') || excluded.has(path)) continue;
     const roamPath = path.match(
-      /^worlds\.socialmedia\.platforms\.(bilibili|douyin|kuaishou)\.roaming\.(.+)$/,
+      /^worlds\.socialmedia\.platforms\.(bilibili|douyin|tieba|xiaohongshu)\.roaming\.(.+)$/,
     );
-    const parent =
+    const platformSetting = path.match(/^worlds\.socialmedia\.platforms\.(bilibili|douyin|tieba|xiaohongshu)\.(visualDaily|corpusWeight)$/);
+    if (/^worlds\.socialmedia\.platforms\.(tieba|xiaohongshu)\./.test(path) && !roamPath && !platformSetting) continue;
+    const ownerQuota = path === 'worlds.socialmedia.focus.outsideReplyLimit';
+    const replyTotal = path === 'worlds.socialmedia.platforms.bilibili.posting.maxDailyReplies';
+    const parent = ownerQuota ? ownerReplySection : replyTotal ? extraSection : platformSetting
+      ? (platformSetting[2] === 'visualDaily' ? visualCards : learningCards).get(platformSetting[1] as typeof ROAMING_PLATFORMS[number])!
+      :
       path.startsWith('worlds.socialmedia.platforms.bilibili.dynamics.') ||
       /^worlds\.socialmedia\.focus\.(allowMentions|maxDailyMentions)$/.test(path)
         ? ['enabled', 'allowPublishing', 'autonomousEnabled', 'allowMentions'].includes(
@@ -1220,7 +1215,7 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
             ? groupSection
             : groupAdvanced
           : roamPath
-            ? ['enabled', 'mode', 'idleMinutes', 'minIntervalMinutes'].includes(roamPath[2])
+            ? ['enabled', 'idleMinutes', 'minIntervalMinutes'].includes(roamPath[2])
               ? roamCards.get(roamPath[1])!
               : roamFields.get(roamPath[1])!
             : path.startsWith('worlds.socialmedia.media.')
@@ -1237,16 +1232,7 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
                   ? isFocusPrimary(path)
                     ? douyinFocusSection
                     : douyinFocusTiming
-                  : path.startsWith('worlds.socialmedia.platforms.kuaishou.focus.')
-                    ? isFocusPrimary(path)
-                      ? kuaishouFocusSection
-                      : kuaishouFocusTiming
-                    : path.startsWith('worlds.socialmedia.platforms.kuaishou.') ||
-                        path.startsWith('worlds.socialmedia.kuaishouBrowser.')
-                      ? path.startsWith('worlds.socialmedia.kuaishouBrowser.')
-                        ? kuaishouAdvanced
-                        : kuaishouLimits
-                      : path.startsWith('worlds.socialmedia.platforms.douyin.') ||
+                  : path.startsWith('worlds.socialmedia.platforms.douyin.') ||
                           path.startsWith('worlds.socialmedia.douyinBrowser.')
                         ? path.startsWith('worlds.socialmedia.douyinBrowser.')
                           ? douyinAdvanced
@@ -1256,7 +1242,7 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
                           : advanced;
     const label = el('label', undefined, 'sm-config-field');
     const copy = el('span');
-    copy.append(el('strong', prop.title));
+    copy.append(el('strong', ownerQuota ? '每天最多回复主人几次' : replyTotal ? '每天最多回复所有人的通知（含主人）' : prop.title));
     if (prop.description) copy.append(el('small', prop.description));
     if (prop.type === 'integer' && prop.minimum !== undefined && prop.maximum !== undefined)
       copy.append(el('small', '可填 ' + prop.minimum + '–' + prop.maximum));
@@ -1266,6 +1252,7 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
       for (const v of prop.enum) {
         const o = el(
           'option',
+          platformSetting ? platformOptionLabels[v] ?? v :
           v === 'quiet'
             ? '安静'
             : v === 'balanced'
@@ -1354,10 +1341,16 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
       label.after(presets);
     }
   }
+  for (const [id, fields] of roamFields) roamCards.get(id)!.append(fields);
+  groupSection.append(groupAdvanced);
   const saveExtras = async (scope: SaveScope) => {
     const values: Record<string, unknown> = {};
     for (const [key, input] of extraInputs) {
-      if (settingScope(key) !== scope) continue;
+      if (settingScope(key) !== scope || !dirtyExtras.has(key)) continue;
+      if (!input.validity.valid || (input instanceof HTMLInputElement && input.type === 'number' && !input.value.trim())) {
+        input.focus();
+        throw new Error('请检查「' + input.getAttribute('aria-label') + '」的取值范围。');
+      }
       const p = SOCIALMEDIA_CONFIG_GROUP.schema.properties[key];
       values[key] =
         p.type === 'boolean'
@@ -1373,12 +1366,17 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
           ? undefined
           : 'worlds.socialmedia.platforms.' + scope + '.focus.';
     const focusChanged = prefix && [...dirtyExtras].some((k) => k.startsWith(prefix));
-    if (prefix && values[prefix + 'autoReplyNewComments']) values[prefix + 'enabled'] = true;
+    if (!Object.keys(values).length) return;
+    const checkFocus = prefix && focusChanged && (extraInputs.get(prefix + 'enabled') as HTMLInputElement)?.checked && extraInputs.get(prefix + 'account')?.value.trim();
     await saveConfig('world:socialmedia', values);
-    for (const key of Object.keys(values)) dirtyExtras.delete(key);
+    for (const [key, saved] of Object.entries(values)) {
+      const input = extraInputs.get(key)!;
+      const current = input instanceof HTMLInputElement && input.type === 'checkbox' ? input.checked : input.value;
+      if (String(current) === String(saved)) dirtyExtras.delete(key);
+    }
     refreshSaveHints();
     await refresh();
-    if (prefix && focusChanged && values[prefix + 'enabled'] && values[prefix + 'account']) {
+    if (checkFocus) {
       feedback.textContent = '设置已保存，正在检查关注账号与作品…';
       try {
         await ctx.invoke('focusRefresh', [scope]);
@@ -1394,7 +1392,7 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
   };
   button('保存画面设置', () => saveExtras('resources'), resourceSection).classList.add('sm-save-visual');
   resourceSection.append(maintenance);
-  function platformSave(id: 'bilibili' | 'douyin' | 'kuaishou', title: string) {
+  function platformSave(id: Exclude<SaveScope, 'resources'>, title: string) {
     const bar = el('div', undefined, 'sm-platform-savebar'),
       hint = el('small', '无待保存修改');
     hint.setAttribute('role', 'status');
@@ -1405,8 +1403,7 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
     return bar;
   }
   const saveBilibili = platformSave('bilibili', 'B站'),
-    saveDouyin = platformSave('douyin', '抖音'),
-    saveKuaishou = platformSave('kuaishou', '快手');
+    saveDouyin = platformSave('douyin', '抖音');
   const webLoginButtons = el('div', undefined, 'sm-toolbar');
   for (const [label, method] of [
     ['打开B站网页登录', 'bilibiliLogin'],
@@ -1434,13 +1431,18 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
     logoutButton,
     credentials,
   );
+  advanced.append(loginGuide('bilibili'));
+  douyinAdvanced.append(loginGuide('douyin'));
+  dyControls.checks.append(usageChecks('douyin'));
   biliSocial.append(biliSocialAdvanced);
   accountSection.append(
     roamCards.get('bilibili')!,
     focusSection,
+    ownerReplySection,
     biliSocial,
     extraSection,
-    advanced,
+    usageChecks('bilibili'), advanced,
+    visualCards.get('bilibili')!, learningCards.get('bilibili')!,
     saveBilibili,
   );
   const douyinNotifications = fold('通知与 @');
@@ -1453,33 +1455,29 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
     feedback.textContent = result.detail + ' 可在官网顶部手动查看「通知」。';
     feedback.hidden = false;
   }, douyinNotifications);
-  const kuaishouBoundary = el(
-    'p', '实验接入。普通视频可尝试读详情、评论和主评；楼中楼的公开可见性仍需核对。图文发评和视频抽帧暂未接入。', 'sm-platform-boundary',
-  );
-  kuaishouSection.insertBefore(kuaishouBoundary, kuaishouSection.children[1] ?? null);
   douyinSection.append(
-    douyinNotifications,
     roamCards.get('douyin')!,
     douyinFocusSection,
     groupSection,
-    douyinLimits,
-    douyinAdvanced,
+    douyinLimits, douyinNotifications,
+    dyControls.checks, douyinAdvanced, visualCards.get('douyin')!,
+    learningCards.get('douyin')!,
     saveDouyin,
   );
-  kuaishouSection.append(
-    roamCards.get('kuaishou')!,
-    kuaishouFocusSection,
-    kuaishouLimits,
-    kuaishouAdvanced,
-    saveKuaishou,
-  );
+  const experiments = settingsMode ? expressionSettings(ctx, refresh) : undefined;
+  for (const [id, title, panel] of experiments?.publicPanels ?? []) {
+    panel.insertBefore(roamCards.get(id)!, panel.querySelector('.sm-platform-focus'));
+    const visualControl = panel.querySelector('.sm-platform-visual-control');
+    if (visualControl) visualCards.get(id)!.append(visualControl);
+    panel.append(visualCards.get(id)!, learningCards.get(id)!, platformSave(id, title));
+  }
   const platformTabs = el('div', undefined, 'sm-platform-tabs');
   platformTabs.setAttribute('role', 'tablist');
   platformTabs.setAttribute('aria-label', '平台配置');
   const platformPanels = [
     ['bilibili', '哔哩哔哩', accountSection],
     ['douyin', '抖音', douyinSection],
-    ['kuaishou', '快手', kuaishouSection],
+    ...(experiments?.publicPanels ?? []),
   ] as const;
   const platformButtons = new Map<string, HTMLButtonElement>();
   const prefix = settingsMode ? 'sm-settings' : 'sm-detached';
@@ -1497,7 +1495,7 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
     const tab = el('button');
     const badge = el('small', '正在读取状态', 'sm-channel-status');
     const name = el('strong', title);
-    const experimental = id === 'douyin' || id === 'kuaishou';
+    const experimental = id === 'tieba';
     if (experimental) name.append(el('span', '实验', 'sm-experimental'));
     tab.append(name, badge);
     tab.setAttribute('aria-label', experimental ? title + '（实验）' : title);
@@ -1547,9 +1545,9 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
   }, { signal: ctx.signal });
   layoutLinks.append(el('h3', '平台'), jumpVisual);
   const platformColumn = el('div', undefined, 'sm-primary');
-  platformColumn.append(layoutLinks, platformTabs, accountSection, douyinSection, kuaishouSection);
+  platformColumn.append(layoutLinks, platformTabs, ...platformPanels.map(([, , panel]) => panel));
   const settingsRail = el('aside', undefined, 'sm-rail');
-  settingsRail.append(resourceSection, roamSection);
+  settingsRail.append(roamSection, resourceSection);
   settings.append(platformColumn, settingsRail);
   ctx.guardLeave?.(() => (dirtyExtras.size ? '还有未保存的设置，离开将放弃这些修改。' : null));
   const overview = el('div', undefined, 'sm-overview');
@@ -1682,18 +1680,7 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
   }
   const workPager = el('nav', undefined, 'sm-toolbar sm-pagination sm-work-pager');
   workPager.setAttribute('aria-label', '作品分页');
-  feed.append(feedHeading, feedToolbar, workPager, timeline);
-  const kuaishouFocusPanel = focusView(
-    async () => {
-      await perform(async () => {
-        await ctx.invoke('focusRefresh', ['kuaishou']);
-        await refresh();
-      });
-    },
-    ctx.signal,
-    '快手特别关注',
-    'kuaishou',
-  );
+  if (!settingsMode) feed.append(feedHeading, feedToolbar, workPager, timeline);
   const focusPanel = focusView(async () => {
     await perform(async () => {
       await ctx.invoke('focusRefresh');
@@ -1896,20 +1883,7 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
   root.append(header, alert);
   if (settingsMode) {
     settingsRail.append(capabilities);
-    const experiments = expressionSettings(ctx);
-    if (PUBLIC_POST_TRIAL_ENABLED) {
-      const publicLinks = el('div', undefined, 'sm-public-links');
-      for (const [platform, label] of [['tieba', '百度贴吧'], ['xiaohongshu', '小红书']] as const) {
-        const button = el('button', label + ' · 试读');
-        button.append(el('span', '实验', 'sm-experimental'));
-        button.setAttribute('aria-label', label + ' · 试读（实验）');
-        button.type = 'button';
-        button.addEventListener('click', () => experiments.openPublic(platform), { signal: ctx.signal });
-        publicLinks.append(button);
-      }
-      platformTabs.after(publicLinks);
-    }
-    root.append(feedback, settings, experiments.element);
+    root.append(feedback, settings, experiments!.element);
   } else {
     const layout = el('div', undefined, 'sm-record-layout');
     const side = el('aside', undefined, 'sm-rail sm-activity');
@@ -1919,7 +1893,6 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
       summary,
       focusPanel.element,
       douyinFocusPanel.element,
-      kuaishouFocusPanel.element,
       groupRecords,
       dynamicRecords,
       dynamicPosts,
@@ -2077,11 +2050,9 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
           'span',
           (group.platform === 'douyin'
             ? '抖音'
-            : group.platform === 'kuaishou'
-              ? '快手'
               : group.platform === 'bilibili'
                 ? '哔哩哔哩'
-                : group.platform) +
+                : group.platform === 'tieba' ? '百度贴吧' : group.platform === 'xiaohongshu' ? '小红书' : group.platform) +
             ' · ' +
             sent +
             ' 条发言' +
@@ -2407,29 +2378,32 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
     renderGroups(state);
     const p = state.platforms.find((p) => p.id === 'bilibili');
     const dy = state.platforms.find((p) => p.id === 'douyin');
-    const ks = state.platforms.find((p) => p.id === 'kuaishou');
     for (const [id, tab] of platformButtons) {
       const platform = state.platforms.find((entry) => entry.id === id);
+      const publicState = isPublicPostPlatform(id) ? state.publicPlatforms?.[id] : undefined;
       const badge = tab.querySelector('small')!;
-      const status = !platform?.enabled ? '未启用' : platform.error ? '连接待检查'
-        : platform.account ? '已连接' : '已启用 · 登录待核对';
+      const status = !platform?.enabled ? '未启用' : platform.error || publicState?.paused ? '连接待检查'
+        : platform.account && (publicState?.bound ?? true) ? '已连接' : '已启用 · 登录待核对';
       badge.textContent = status;
-      badge.dataset.connected = String(Boolean(platform?.enabled && platform.account && !platform.error));
+      badge.dataset.connected = String(Boolean(platform?.enabled && status === '已连接'));
     }
     refreshSaveHints();
     dyControls.render(state);
-    ksControls.render(state);
-    focusPanel.render(state.focusPlatforms?.bilibili ?? state.focus, p?.enabled ?? true);
+    experiments?.renderPublic(
+      state.publicPlatforms,
+      state.platforms.find(platform => platform.id === 'xiaohongshu')?.publishing?.ownerCommentsToday,
+    );
+    const biliFocus = state.focusPlatforms?.bilibili ?? state.focus;
     const dyFocus = state.focusPlatforms?.douyin;
-    douyinFocusPanel.render(dyFocus, dy?.enabled ?? true);
-    const ksFocus = state.focusPlatforms?.kuaishou;
-    kuaishouFocusPanel.render(ksFocus, ks?.enabled ?? true);
-    for (const [node, focus, platformEnabled] of [
-      [biliFocusStatus, state.focusPlatforms?.bilibili ?? state.focus, p?.enabled ?? true],
-      [douyinFocusStatus, dyFocus, dy?.enabled ?? true],
-      [kuaishouFocusStatus, ksFocus, ks?.enabled ?? true],
+    const biliOwnerCount = p?.publishing?.ownerCommentsToday;
+    const dyOwnerCount = dy?.publishing?.ownerCommentsToday;
+    focusPanel.render(biliFocus, p?.enabled ?? true, biliOwnerCount);
+    douyinFocusPanel.render(dyFocus, dy?.enabled ?? true, dyOwnerCount);
+    for (const [node, focus, platformEnabled, ownerCount] of [
+      [biliFocusStatus, biliFocus, p?.enabled ?? true, biliOwnerCount],
+      [douyinFocusStatus, dyFocus, dy?.enabled ?? true, dyOwnerCount],
     ] as const) {
-      const view = focusStatus(focus, platformEnabled);
+      const view = focusStatus(focus, platformEnabled, ownerCount);
       node.textContent = view.label + '\n' + view.detail;
       node.dataset.state = view.tone;
       node.classList.add('sm-focus-status');
@@ -2458,6 +2432,9 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
               ? (state.config.platforms[parts[1]].roaming?.enabled ?? true)
               : roamingConfig(state.config, parts[1])[key];
         }
+        if (path.endsWith('.outsideReplyLimit')) value ??= 5;
+        if (path.endsWith('.visualDaily')) value ??= 'inherit';
+        if (path.endsWith('.corpusWeight')) value ??= state.config.experiments?.corpus ? 'medium' : 'off';
         if (input instanceof HTMLInputElement && input.type === 'checkbox')
           input.checked = Boolean(value);
         else input.value = String(value ?? '');
@@ -2485,6 +2462,10 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
           policy.minIntervalMinutes +
           '分钟'
         : '沿用统一默认';
+      const summary = card.querySelector('summary')!;
+      let badge = summary.querySelector<HTMLElement>('.sm-fold-status');
+      if (!badge) { badge = el('span', '', 'sm-fold-status'); summary.append(badge); }
+      badge.textContent = !policy ? '' : !policy.enabled ? '关闭' : '空闲 ' + policy.idleMinutes + ' 分钟 · 间隔 ' + policy.minIntervalMinutes + ' 分钟';
       for (const b of card.querySelectorAll<HTMLButtonElement>('[data-roam-preset]')) {
         const preset = ROAMING_PRESETS[b.dataset.roamPreset as keyof typeof ROAMING_PRESETS];
         b.setAttribute(
@@ -2505,14 +2486,13 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
     roamSummary.textContent = !r
       ? '正在读取闲逛状态…'
       : r.enabled
-        ? '已开启 · 三平台独立计数，按各自等待轮流闲逛'
+        ? '已开启 · 各平台独立计数，按各自等待轮流闲逛'
         : '已暂停发起新闲逛，各平台设置会保留。';
+    idleSample = typeof r?.idleSeconds === 'number' && typeof r.idle === 'boolean'
+      ? { seconds: r.idleSeconds, idle: r.idle, at: Date.now() } : undefined;
+    updateIdleClock();
     roamPlatformStates.replaceChildren();
-    for (const [id, title] of [
-      ['bilibili', '哔哩哔哩'],
-      ['douyin', '抖音'],
-      ['kuaishou', '快手'],
-    ] as const) {
+    for (const [id, title] of platformPanels) {
       const policy =
         r?.platforms?.[id]?.limits ?? (state.config ? roamingConfig(state.config, id) : undefined);
       const chip = el(
@@ -2530,10 +2510,7 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
     }
     summary.textContent = `${p?.account ? 'B站已连接' : p?.enabled ? 'B站待连接' : 'B站未启用'} · ${p?.account?.name ?? (state.credentialSaved ? '已保存登录' : '尚未登录')}${p?.lastPollAt ? ' · 最近同步 ' + prettyTime(p.lastPollAt) : ''}`;
     summary.textContent += dy?.enabled
-      ? ' · 抖音' + (dy.account ? '已登录 · ' + dy.account.name : '已启用（实验）')
-      : '';
-    summary.textContent += ks?.enabled
-      ? ' · 快手' + (ks.account ? '已登录 · ' + ks.account.name : '已启用（实验）')
+      ? ' · 抖音' + (dy.account ? '已登录 · ' + dy.account.name : '已启用')
       : '';
     connectionSummary.textContent = p?.account
       ? '已登录 ' + p.account.name + (p.lastPollAt ? ' · 最近同步 ' + prettyTime(p.lastPollAt) : '')
@@ -2571,10 +2548,18 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
     const rsrc = state.resources;
     if (rsrc) {
       const mb = (n: number) => (n / 1048576).toFixed(1) + 'MB';
+      for (const [id, usage] of learningUsage) {
+        const mode = state.config?.platforms[id]?.visualDaily ?? 'inherit';
+        const unlimited = mode === 'inherit' ? rsrc.unlimitedDailyVisualCalls : mode === 'unlimited';
+        usage.textContent = rsrc.maxDailyVisualCalls === 0 ? '全局画面已关闭' :
+          '本站今日已看 ' + (rsrc.byPlatform?.[id] ?? 0) + ' 次 · ' +
+          (unlimited ? '每日不限次数' : '本站上限 ' + rsrc.maxDailyVisualCalls + ' 次');
+      }
       visualToday.textContent = rsrc.maxDailyVisualCalls === 0
         ? '画面已关闭 · 今日已看 ' + rsrc.todayCalls + ' 次'
         : '今天已看 ' + rsrc.todayCalls +
-          (rsrc.unlimitedDailyVisualCalls ? ' 次 · 每日次数不限' : ' / ' + rsrc.maxDailyVisualCalls + ' 次');
+          (rsrc.byPlatform ? ' 次 · 各平台独立计数' :
+            (rsrc.unlimitedDailyVisualCalls ? ' 次 · 每日次数不限' : ' / ' + rsrc.maxDailyVisualCalls + ' 次'));
       resourceStatus.textContent =
         '图片缓存 ' +
         mb(rsrc.cacheBytes) +

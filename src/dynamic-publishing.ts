@@ -106,7 +106,7 @@ export class DynamicPublishing {
       ).length >= cfg.maxDailyPosts
     )
       throw Error('今日动态发布已达本地上限。');
-    if (records.some((x) => this.clock() - Date.parse(x.attemptedAt!) < cfg.minIntervalSec * 1000))
+    if (records.some((x) => x.status !== 'rejected' && this.clock() - Date.parse(x.attemptedAt!) < cfg.minIntervalSec * 1000))
       throw Error('动态发布间隔尚未到，不重复尝试。');
     const sending: DynamicPost = {
       ...r,

@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { ROAMING_PLATFORMS, roamingConfig, type SocialMediaConfigSection } from './config.ts';
+import { isOwnerCommentRecord } from './platform.ts';
 import type { SocialStore } from './store.ts';
 export type ReadingSource = '兴趣推荐' | '主动搜索' | '相邻主题';
 export function workFingerprint(title: string) {
@@ -36,22 +37,23 @@ export class Roaming {
       day: '2-digit',
     }).format(new Date(time));
   }
-  private platformOf(r: RoamSession) {
-    return (
-      r.platform ??
-      (r.videos[0]?.url.includes('douyin.com')
-        ? 'douyin'
-        : r.videos[0]?.url.includes('kuaishou.com')
-          ? 'kuaishou'
-          : 'bilibili')
-    );
+  private platformOf(round: RoamSession) {
+    const explicit = ROAMING_PLATFORMS.find(id => id === round.platform);
+    if (round.platform) return explicit;
+    const url = round.videos[0]?.url;
+    if (!url || ['https://www.bilibili.com/', 'https://bilibili.com/', 'https://m.bilibili.com/'].some(origin => url.startsWith(origin))) return 'bilibili';
+    if (url.startsWith('https://www.douyin.com/')) return 'douyin';
+    if (url.startsWith('https://tieba.baidu.com/')) return 'tieba';
+    if (url.startsWith('https://www.xiaohongshu.com/')) return 'xiaohongshu';
   }
-  private policy(r: RoamSession) {
-    return roamingConfig(this.cfg, this.platformOf(r));
+  private policy(round: RoamSession) {
+    const platform = this.platformOf(round);
+    if (!platform) throw Error('此平台已停用，无法继续闲逛。');
+    return roamingConfig(this.cfg, platform);
   }
   private expire() {
     for (const r of this.store.roams())
-      if (
+      if (this.platformOf(r) &&
         ['offered', 'active'].includes(r.status) &&
         !(r.status === 'active' && this.policy(r).mode === 'free') &&
         Date.parse(
@@ -68,7 +70,7 @@ export class Roaming {
   }
   status() {
     this.expire();
-    const all = this.store.roams(),
+    const all = this.store.roams().filter(round => this.platformOf(round)),
       today = this.day(new Date(this.now()).toISOString());
     const platforms = Object.fromEntries(
       ROAMING_PLATFORMS.map((id) => [
@@ -172,7 +174,7 @@ export class Roaming {
     if (!allowDisabled && !this.cfg.roaming.enabled) throw Error('闲逛已关闭');
     this.expire();
     const r = this.store.roams().find((r) => r.id === id);
-    if (!r) throw Error('闲逛记录不存在');
+    if (!r || !this.platformOf(r)) throw Error('闲逛记录不存在');
     if (r.status === 'expired') throw Error('本轮闲逛已超时，请留待下一次机会');
     if (!['offered', 'active'].includes(r.status)) throw Error('本轮闲逛已结束');
     return r;
@@ -315,7 +317,7 @@ export class Roaming {
       if (!r.videos.some((v) => v.aid === oid)) throw Error('闲逛发言须指向本轮读过的视频');
       const count = this.store
         .outbox()
-        .filter((s) => s.roamId === id && s.status !== 'rejected').length;
+        .filter(s => s.roamId === id && s.status !== 'rejected' && !isOwnerCommentRecord(s)).length;
       if (count >= c.maxCommentsPerSession) throw Error('本轮主动发言预算已用完');
     }
     const today = this.day(new Date(this.now()).toISOString());
@@ -324,6 +326,7 @@ export class Roaming {
       .filter(
         (s) =>
           Boolean(s.roamId) &&
+          !isOwnerCommentRecord(s) &&
           s.platform === this.platformOf(round) &&
           !s.inboxId &&
           s.status !== 'rejected' &&

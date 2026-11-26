@@ -1,10 +1,14 @@
+import { POST_PLATFORMS, PUBLIC_POST_NAMES, type PostVisualLevel } from './public-post-policy.ts';
 import { GROUP_DEFAULTS, type GroupConfig } from './group-policy.ts';
 import { MAX_VIDEO_FRAMES, RESOURCE_DEFAULTS, type ResourceConfig } from './resource-policy.ts';
 import type { ConfigGroup } from 'cortico/core/types.ts';
 // Release switch for the public-post adapters. Keep existing deployment settings and records for future trials.
-export const PUBLIC_POST_TRIAL_ENABLED = false;
+export const PUBLIC_POST_TRIAL_ENABLED = true;
 
 export interface SocialPlatformConfig {
+  postVisual?: PostVisualLevel;
+  visualDaily?: 'inherit' | 'bounded' | 'unlimited';
+  corpusWeight?: 'off' | 'light' | 'medium' | 'strong';
   chat?: GroupConfig;
   dynamics?: {
     enabled: boolean;
@@ -25,6 +29,7 @@ export interface SocialPlatformConfig {
   monitor: { enabled: boolean; intervalSec: number };
   posting: {
     enabled: boolean;
+    allowTopLevelComments?: boolean;
     minIntervalSec: number;
     maxDailyComments: number;
     maxDailyReplies: number;
@@ -94,7 +99,7 @@ export const ROAMING_PRESETS = {
     maxTextChars: 12000,
   },
 } satisfies Record<string, Omit<RoamingConfig, 'enabled'>>;
-export const ROAMING_PLATFORMS = ['bilibili', 'douyin', 'kuaishou'] as const;
+export const ROAMING_PLATFORMS = ['bilibili', 'douyin', ...POST_PLATFORMS] as const;
 export function roamingConfig(cfg: SocialMediaConfigSection, platform: string): RoamingConfig {
   const local = cfg.platforms[platform]?.roaming;
   return {
@@ -105,9 +110,15 @@ export function roamingConfig(cfg: SocialMediaConfigSection, platform: string): 
       cfg.roaming.enabled && Boolean(cfg.platforms[platform]?.enabled) && (local?.enabled ?? true),
   };
 }
+export function corpusWeight(cfg: SocialMediaConfigSection, platform: string) {
+  if (!cfg.enabled || !cfg.platforms[platform]?.enabled || !ROAMING_PLATFORMS.some(id => id === platform)) return 0;
+  const weight = cfg.platforms[platform].corpusWeight ?? (cfg.experiments?.corpus ? 'medium' : 'off');
+  return { off: 0, light: 1, medium: 2, strong: 3 }[weight] ?? 0;
+}
 export const REPLY_PRESETS = { light: 40, balanced: 80, active: 120 };
 export const MAX_REPLIES_PER_PERSON = 5;
 export interface FocusConfig {
+  outsideReplyLimit?: number;
   allowMentions?: boolean;
   maxDailyMentions?: number;
   autoReplyNewComments?: boolean;
@@ -125,6 +136,7 @@ export interface SocialMediaConfigSection {
   roaming: RoamingConfig;
   experiments?: { corpus?: boolean; practice?: boolean; training?: boolean; tieba?: boolean; xiaohongshu?: boolean };
   platforms: Record<string, SocialPlatformConfig>;
+  publicAccounts?: Partial<Record<typeof POST_PLATFORMS[number], string>>;
   media: { ffmpegFile: string; maxFrames: number } & Partial<ResourceConfig>;
   browser: { executableFile: string; background: boolean };
   douyinBrowser?: {
@@ -135,7 +147,6 @@ export interface SocialMediaConfigSection {
     hideCompatibilityWindow?: boolean;
     pageWaitSeconds?: number;
   };
-  kuaishouBrowser?: { executableFile: string; background: boolean };
 }
 export function douyinPageWaitMs(seconds?: number) {
   return (Number.isFinite(seconds) ? Math.max(15, Math.min(120, seconds!)) : 45) * 1000;
@@ -147,6 +158,7 @@ export const SOCIALMEDIA_SECRET = 'SOCIALMEDIA_BILIBILI_COOKIE';
 export const SOCIALMEDIA_DEFAULTS: SocialMediaConfigSection = {
   enabled: false,
   focus: {
+    outsideReplyLimit: 5,
     allowMentions: false,
     maxDailyMentions: 3,
     enabled: false,
@@ -161,27 +173,15 @@ export const SOCIALMEDIA_DEFAULTS: SocialMediaConfigSection = {
   roaming: { enabled: false, ...ROAMING_PRESETS.active },
   experiments: { corpus: false, practice: false, training: false, tieba: false, xiaohongshu: false },
   platforms: {
-    kuaishou: {
+    ...Object.fromEntries(POST_PLATFORMS.map(id => [id, {
       enabled: false,
-      focus: {
-        enabled: false,
-        account: '',
-        intervalMinutes: 30,
-        maxDailyActions: 8,
-        maxVideos: 12,
-        autoReplyNewComments: false,
-        replyExistingComments: false,
-        autoReplyIntervalMinutes: 2,
-      },
+      postVisual: 'medium',
+      roaming: { enabled: true, ...ROAMING_PRESETS.light },
+      focus: { enabled: false, account: '', intervalMinutes: 30, maxDailyActions: 8, maxVideos: 3,
+        autoReplyNewComments: false, autoReplyIntervalMinutes: id === 'xiaohongshu' ? 5 : 20, replyExistingComments: false },
       monitor: { enabled: false, intervalSec: 300 },
-      posting: {
-        enabled: false,
-        minIntervalSec: 60,
-        maxDailyComments: 30,
-        maxDailyReplies: 20,
-        transport: 'api',
-      },
-    },
+      posting: { enabled: false, minIntervalSec: 90, maxDailyComments: 10, maxDailyReplies: 10, transport: 'browser' },
+    } satisfies SocialPlatformConfig])),
     douyin: {
       chat: structuredClone(GROUP_DEFAULTS),
       focus: {
@@ -239,7 +239,6 @@ export const SOCIALMEDIA_DEFAULTS: SocialMediaConfigSection = {
     hideCompatibilityWindow: false,
     pageWaitSeconds: 45,
   },
-  kuaishouBrowser: { executableFile: '', background: true },
 };
 export const SOCIALMEDIA_CONFIG_GROUP: ConfigGroup = {
   id: 'world:socialmedia',
@@ -255,92 +254,6 @@ export const SOCIALMEDIA_CONFIG_GROUP: ConfigGroup = {
         'worlds.socialmedia.experiments.tieba': { type: 'boolean', title: '百度贴吧公开帖' },
         'worlds.socialmedia.experiments.xiaohongshu': { type: 'boolean', title: '小红书公开帖' },
       } : {}),
-      ...Object.fromEntries(
-        Object.entries({
-          enabled: { type: 'boolean', title: '启用快手（实验）' },
-          'posting.enabled': {
-            type: 'boolean',
-            title: '允许快手视频评论区发评（实验）',
-            description:
-              '仅限已核实的普通视频；楼中楼仍为实验接口，不支持图文自动发评或普通群聊。平台受理不保证其他账号可见。',
-          },
-          'posting.minIntervalSec': {
-            type: 'integer',
-            title: '快手发布最小间隔（秒）',
-            minimum: 30,
-            maximum: 3600,
-          },
-          'posting.maxDailyComments': {
-            type: 'integer',
-            title: '快手每日普通发布上限',
-            minimum: 1,
-            maximum: 200,
-          },
-          'posting.maxDailyReplies': {
-            type: 'integer',
-            title: '快手每日普通通知回应上限',
-            minimum: 0,
-            maximum: 200,
-          },
-          'focus.enabled': { type: 'boolean', title: '优先关注快手主人作品与评论区' },
-          'focus.account': {
-            type: 'string',
-            title: '快手主人主页或快手号',
-            description:
-              '完整www.kuaishou.com/profile/主页可直接核对；快手号须搜索并核实主页上的号码，绝不按同名猜测。',
-          },
-          'focus.autoReplyNewComments': {
-            type: 'boolean',
-            title: '自动回应快手主人评论区的新评论',
-            description:
-              '默认关闭，首次扫描建立旧评论基线；仅覆盖官网能返回并核实的普通视频，不支持图文自动回应。作品检查未完成不代表没有新评论。',
-          },
-          'focus.replyExistingComments': {
-            type: 'boolean',
-            title: '也考虑快手已有未回复评论',
-            description:
-              '需开启自动回应；在已读取的主人作品范围内补看旧评论，已有发送记录的位置不重复发。',
-          },
-          'focus.autoReplyIntervalMinutes': {
-            type: 'integer',
-            title: '快手新评论检查间隔（分钟）',
-            description: '开启自动回应后，在设定间隔检查已监测作品的新评论。',
-            minimum: 2,
-            maximum: 60,
-          },
-          'focus.intervalMinutes': {
-            type: 'integer',
-            title: '快手关注检查间隔（分钟）',
-            description: '隔多久去看一次特别关注的近期作品。',
-            minimum: 10,
-            maximum: 1440,
-          },
-          'focus.maxDailyActions': {
-            type: 'integer',
-            title: '快手每天最多主动捧场次数',
-            minimum: 0,
-            maximum: 30,
-          },
-          'focus.maxVideos': {
-            type: 'integer',
-            title: '快手最近监测的作品数量',
-            minimum: 1,
-            maximum: 30,
-          },
-        }).map(([k, v]) => ['worlds.socialmedia.platforms.kuaishou.' + k, { ...v, 'x-hot': true }]),
-      ),
-      'worlds.socialmedia.kuaishouBrowser.executableFile': {
-        type: 'string',
-        title: '快手浏览器程序',
-        description: '留空优先Edge，再寻找Chrome。',
-        'x-hot': true,
-      },
-      'worlds.socialmedia.kuaishouBrowser.background': {
-        type: 'boolean',
-        title: '快手浏览器后台运行',
-        description: '默认无窗口后台运行，不抢前台；扫码登录时从配置主动打开可见窗口。',
-        'x-hot': true,
-      },
       ...Object.fromEntries(
         Object.entries({
           enabled: { type: 'boolean', title: '优先关注抖音主人作品与评论区' },
@@ -378,7 +291,8 @@ export const SOCIALMEDIA_CONFIG_GROUP: ConfigGroup = {
           },
           maxDailyActions: {
             type: 'integer',
-            title: '抖音每天最多参与关注内容',
+            title: '抖音关注参与次数（旧设置）',
+            description: '保留旧版配置兼容。已核实的主人作品评论区使用独立计数。',
             minimum: 0,
             maximum: 30,
           },
@@ -388,6 +302,10 @@ export const SOCIALMEDIA_CONFIG_GROUP: ConfigGroup = {
           { ...value, 'x-hot': true },
         ]),
       ),
+      'worlds.socialmedia.focus.outsideReplyLimit': {
+        type: 'integer', title: '主人在其他作品下的每日通知回复上限', minimum: 5, maximum: 100,
+        description: 'B站按已绑定的主人账号计数，默认5条。仍受普通发布与通知总额度限制。', 'x-hot': true,
+      },
       'worlds.socialmedia.focus.autoReplyNewComments': {
         type: 'boolean',
         title: '自动回应B站主人评论区的新评论',
@@ -432,10 +350,10 @@ export const SOCIALMEDIA_CONFIG_GROUP: ConfigGroup = {
       },
       'worlds.socialmedia.focus.maxDailyActions': {
         type: 'integer',
-        title: '每天最多参与关注内容',
+        title: 'B站关注参与次数（旧设置）',
         minimum: 0,
         maximum: 30,
-        description: '普通主动捧场的次数；主人作品评论自动回应单独计账，不占此额度。',
+        description: '保留旧版配置兼容。已核实的主人作品评论区使用独立计数。',
         'x-hot': true,
       },
       'worlds.socialmedia.focus.maxVideos': {
@@ -513,7 +431,7 @@ export const SOCIALMEDIA_CONFIG_GROUP: ConfigGroup = {
       ),
       'worlds.socialmedia.platforms.douyin.enabled': {
         type: 'boolean',
-        title: '启用抖音（实验）',
+        title: '启用抖音',
         description: '使用独立Edge读取视频和评论；不会读取日常浏览器账号。',
         'x-hot': true,
       },
@@ -747,7 +665,7 @@ export const SOCIALMEDIA_CONFIG_GROUP: ConfigGroup = {
         minimum: 0,
         maximum: 300,
         description:
-          '收到回复和@的独立额度，不占闲逛主动发言额度；普通回复仍计入普通发布上限；主人评论区自动回应单独计账，不设日总量和单人次数上限。普通渠道同一人每天最多五条，跨视频累计，重启不重置。',
+          '收到回复和@的独立额度，不占闲逛主动发言额度；普通回复仍计入普通发布上限；已核实的主人作品评论区单独计数。普通渠道同一人每天最多五条（B站绑定主人在其他作品下的通知可单独调高），跨视频累计，重启不重置。',
         'x-hot': true,
       },
       'worlds.socialmedia.media.textFirst': {
@@ -761,13 +679,13 @@ export const SOCIALMEDIA_CONFIG_GROUP: ConfigGroup = {
         title: '每天最多看几次',
         minimum: 0,
         maximum: 200,
-        description: '三平台共用。一次抽帧或翻一批图算一次，重复看缓存和取图失败也计数。设为 0 关闭画面。',
+        description: '各站分别计数。选择限额的站点使用此上限。一次抽帧或翻一批图算一次。设为 0 关闭全部画面。',
         'x-hot': true,
       },
       'worlds.socialmedia.media.unlimitedDailyVisualCalls': {
         type: 'boolean',
-        title: '取消每日次数上限',
-        description: '高消耗选项。开启后每天可取图更多，图片输入和本机取图开销可能增加。单次张数、单张体积与累计交付限制仍生效。次数设为 0 仍会关闭画面。',
+        title: '取消每日画面次数上限',
+        description: '沿用全局设置的平台每日画面观察不限次数，图片输入和本机取图开销可能增加。各平台的发评额度单独计算。单次张数、单张体积与累计交付限制仍生效。次数设为 0 仍会关闭画面。',
         'x-hot': true,
       },
       'worlds.socialmedia.media.maxImageKB': {
@@ -883,7 +801,16 @@ SOCIALMEDIA_CONFIG_GROUP.schema.properties['worlds.socialmedia.roaming.mode'] = 
   'x-hot': true,
 };
 for (const id of ROAMING_PLATFORMS) {
-  const label = { bilibili: 'B站', douyin: '抖音', kuaishou: '快手' }[id];
+  const label = { bilibili: 'B站', douyin: '抖音', ...PUBLIC_POST_NAMES }[id];
+  const path = 'worlds.socialmedia.platforms.' + id + '.';
+  SOCIALMEDIA_CONFIG_GROUP.schema.properties[path + 'visualDaily'] = {
+    type: 'string', enum: ['inherit', 'bounded', 'unlimited'], title: label + '每日画面次数',
+    description: '按本站独立计数。不限次数仍使用每次取图、图片大小及总交付限制。', 'x-hot': true,
+  };
+  SOCIALMEDIA_CONFIG_GROUP.schema.properties[path + 'corpusWeight'] = {
+    type: 'string', enum: ['off', 'light', 'medium', 'strong'], title: label + '语料学习权重',
+    description: '决定本站经验被参考的优先级。关闭后停止学习和参考，已存素材可继续管理。', 'x-hot': true,
+  };
   for (const [path, prop] of Object.entries(SOCIALMEDIA_CONFIG_GROUP.schema.properties).filter(
     ([key]) => key.startsWith('worlds.socialmedia.roaming.'),
   )) {
@@ -892,6 +819,35 @@ for (const id of ROAMING_PLATFORMS) {
       'worlds.socialmedia.platforms.' + id + '.roaming.' + key
     ] = { ...prop, title: label + '闲逛 · ' + prop.title };
   }
+}
+
+for (const id of POST_PLATFORMS) {
+  const key = 'worlds.socialmedia.platforms.' + id + '.';
+  const label = PUBLIC_POST_NAMES[id];
+  Object.assign(SOCIALMEDIA_CONFIG_GROUP.schema.properties, {
+    [key + 'enabled']: { type: 'boolean', title: '启用' + label, 'x-hot': true },
+    [key + 'posting.enabled']: { type: 'boolean', title: '允许' + label + '公开发言', 'x-hot': true },
+    ...(id === 'xiaohongshu' ? {
+      [key + 'focus.autoReplyIntervalMinutes']: {
+        type: 'integer', title: '小红书新评论检查间隔（分钟）', minimum: 2, maximum: 60,
+        description: '默认 5 分钟。主人评论区单独检查，普通闲逛关闭也可以回应。', 'x-hot': true,
+      },
+      [key + 'focus.replyExistingComments']: {
+        type: 'boolean', title: '也考虑小红书主人作品已有的评论',
+        description: '开启后按现有视野和发言额度分批处理旧评论。默认只处理新评论。',
+        'x-hot': true,
+      },
+      [key + 'posting.allowTopLevelComments']: {
+        type: 'boolean', title: '允许在主人小红书作品下新发评论',
+        description: '需同时开启公开发言，并核实作品作者与特别关注绑定一致。每条作品至多一条主动评论。',
+        'x-hot': true,
+      },
+    } : {}),
+    [key + 'postVisual']: { type: 'string', title: label + '画面档位', enum: ['low', 'medium', 'high'], 'x-hot': true },
+    [key + 'focus.account']: { type: 'string', title: label + '主人官网主页', 'x-hot': true },
+    [key + 'focus.enabled']: { type: 'boolean', title: label + '特别关注', 'x-hot': true },
+    [key + 'focus.autoReplyNewComments']: { type: 'boolean', title: label + '回应主人作品下的新评论', 'x-hot': true },
+  });
 }
 
 for (const [key, prop] of Object.entries({

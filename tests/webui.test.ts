@@ -273,7 +273,7 @@ it('lets users fill their own owner and saves focus without losing other unsaved
     owner.value = '同名';
     owner.dispatchEvent(new Event('input'));
     const quota = root.querySelector(
-      '[aria-label="快手每日普通发布上限"]',
+      '[aria-label="抖音每日普通发布上限"]',
     ) as HTMLInputElement | null;
     const other =
       quota ??
@@ -290,7 +290,7 @@ it('lets users fill their own owner and saves focus without losing other unsaved
     expect(changes[0]['worlds.socialmedia.focus.account']).toBe('同名');
     expect(
       Object.keys(changes[0]).every(
-        (k) => !k.includes('platforms.kuaishou') && !k.includes('platforms.douyin'),
+        (k) => !k.includes('platforms.douyin'),
       ),
     ).toBe(true);
     expect(other.value).toBe('67');
@@ -575,7 +575,7 @@ it('labels Douyin and Bilibili sends correctly together under All', async () => 
     status: 'sent',
     receiptId: '9',
     createdAt: new Date().toISOString(),
-    target: { oid: String(77 + i), type: i + 1, root: '0', parent: '0' },
+    target: { oid: String(77 + i), type: [1, 2, 5, 4][i], root: '0', parent: '0' },
   }));
   mount({
     root,
@@ -626,7 +626,7 @@ it('checks the saved Douyin owner immediately without asking to post', async () 
   root.remove();
 });
 
-it('saves a disabled Kuaishou focus without starting a browser or overwriting other platform settings', async () => {
+it('saves Xiaohongshu roaming without checking owner or overwriting other platform settings', async () => {
   const root = document.createElement('div');
   document.body.append(root);
   const controller = new AbortController(),
@@ -649,15 +649,22 @@ it('saves a disabled Kuaishou focus without starting a browser or overwriting ot
     },
   } as unknown as WebUiPanelContext);
   await new Promise((r) => setTimeout(r, 0));
-  [...root.querySelectorAll('button')].find((b) => b.textContent === '保存快手设置')!.click();
+  const save = [...root.querySelectorAll('button')].find((b) => b.textContent === '保存小红书设置')!;
+  save.click();
+  await new Promise((r) => setTimeout(r, 0));
+  expect(calls.some(([m]) => m === 'settings')).toBe(false);
+  const field = root.querySelector<HTMLInputElement>('[data-platform="xiaohongshu"] .sm-platform-roaming input[type="number"]')!;
+  field.value = '31';
+  field.dispatchEvent(new Event('input'));
+  save.click();
   await new Promise((r) => setTimeout(r, 0));
   expect(calls.some(([m]) => m === 'focusRefresh')).toBe(false);
   const saved = calls.find(([m]) => m === 'settings')![1][0];
+  expect(Object.values(saved)).toEqual([31]);
   expect(
     Object.keys(saved).every(
       (k) =>
-        k.startsWith('worlds.socialmedia.platforms.kuaishou.') ||
-        k.startsWith('worlds.socialmedia.kuaishouBrowser.'),
+        k.startsWith('worlds.socialmedia.platforms.xiaohongshu.'),
     ),
   ).toBe(true);
   controller.abort();
@@ -707,7 +714,7 @@ it('shows resource usage and invokes only the World-owned cache cleanup control'
   root.remove();
 });
 
-it('enables Kuaishou immediately like Douyin and does not require a separate settings save', async () => {
+it('enables Xiaohongshu immediately like Douyin and does not require a separate settings save', async () => {
   const root = document.createElement('div');
   document.body.append(root);
   const controller = new AbortController(),
@@ -731,10 +738,10 @@ it('enables Kuaishou immediately like Douyin and does not require a separate set
   } as unknown as WebUiPanelContext);
   await new Promise((r) => setTimeout(r, 0));
   const section = [...root.querySelectorAll('section')].find((s) =>
-    s.querySelector('h3')?.textContent?.startsWith('快手 ·'),
+    s.querySelector('h3')?.textContent?.startsWith('小红书 ·'),
   )!;
   const input = [...section.querySelectorAll<HTMLInputElement>('input[type=checkbox]')].find((i) =>
-    i.parentElement?.textContent?.includes('启用快手'),
+    i.parentElement?.textContent?.includes('启用小红书'),
   )!;
   expect(input).toBeDefined();
   input.checked = true;
@@ -743,19 +750,20 @@ it('enables Kuaishou immediately like Douyin and does not require a separate set
   expect(
     calls.some(
       ([m, a]) =>
-        m === 'settings' && a[0]['worlds.socialmedia.platforms.kuaishou.enabled'] === true,
+        m === 'settings' && a[0]['worlds.socialmedia.platforms.xiaohongshu.enabled'] === true,
     ),
   ).toBe(true);
   controller.abort();
   root.remove();
 });
-it('keeps Kuaishou read errors visible inside its own section instead of leaving a loading message', async () => {
+it('keeps Xiaohongshu read errors visible inside its own section instead of leaving a loading message', async () => {
   const root = document.createElement('div');
   document.body.append(root);
   const controller = new AbortController();
   const state = {
     config: structuredClone(SOCIALMEDIA_DEFAULTS),
-    platforms: [{ id: 'kuaishou', enabled: true, posting: false }],
+    platforms: [{ id: 'xiaohongshu', enabled: true, posting: false }],
+    publicPlatforms: { xiaohongshu: { ...SOCIALMEDIA_DEFAULTS.platforms.xiaohongshu, enabled: true } },
     inbox: [],
     outbox: [],
     pending: 0,
@@ -766,20 +774,20 @@ it('keeps Kuaishou read errors visible inside its own section instead of leaving
     signal: controller.signal,
     interval: () => ({ dispose() {} }),
     invoke: async (method: string) => {
-      if (method === 'kuaishouCheck') throw Error('作品暂不可读');
+      if (method === 'expressionReadPost') throw Error('作品暂不可读');
       return state;
     },
   } as unknown as WebUiPanelContext);
   await new Promise((r) => setTimeout(r, 0));
-  root.querySelector<HTMLInputElement>('[aria-label="快手读取测试的视频"]')!.value =
-    '3xtestvideo1234';
-  [...root.querySelectorAll('button')].find((b) => b.textContent === '测试快手读取')!.click();
+  root.querySelector<HTMLInputElement>('[aria-label="小红书原帖链接"]')!.value =
+    'https://www.xiaohongshu.com/explore/5d7fcb4500000001000190be';
+  [...root.querySelectorAll('button')].find((b) => b.textContent === '读取小红书公开帖')!.click();
   await new Promise((r) => setTimeout(r, 0));
   const section = [...root.querySelectorAll('section')].find((s) =>
-    s.querySelector('h3')?.textContent?.startsWith('快手 ·'),
+    s.querySelector('h3')?.textContent?.startsWith('小红书 ·'),
   )!;
   expect(section.textContent).toContain('作品暂不可读');
-  expect(section.textContent).not.toContain('正在读取快手');
+  expect(section.textContent).not.toContain('正在读取原帖');
   controller.abort();
   root.remove();
 });
@@ -805,23 +813,26 @@ it('groups each platform with its own folded focus, limits and connection settin
   try {
     await new Promise((r) => setTimeout(r, 0));
     const cards = root.querySelectorAll('.sm-platform-card');
-    expect(cards).toHaveLength(3);
-    for (const id of ['bilibili', 'douyin', 'kuaishou']) {
+    expect(cards).toHaveLength(4);
+    for (const id of ['bilibili', 'douyin', 'xiaohongshu', 'tieba']) {
       const card = root.querySelector<HTMLElement>(
         '.sm-platform-card[data-platform="' + id + '"]',
       )!;
       const focus = card.querySelector<HTMLDetailsElement>('.sm-platform-focus')!;
       expect(focus).not.toBeNull();
       expect(focus.open).toBe(false);
-      expect(card.querySelector('.sm-platform-limits')).not.toBeNull();
-      expect(card.querySelector('.sm-platform-advanced')).not.toBeNull();
+      expect(card.querySelector('.sm-platform-roaming')).not.toBeNull();
+      if (id === 'bilibili' || id === 'douyin') {
+        expect(card.querySelector('.sm-platform-limits')).not.toBeNull();
+        expect(card.querySelector('.sm-platform-advanced')).not.toBeNull();
+      }
     }
     expect(
       root
-        .querySelector('[aria-label="快手浏览器程序"]')
+        .querySelector('[aria-label="小红书主人个人主页完整链接"]')
         ?.closest('.sm-platform-card')
         ?.getAttribute('data-platform'),
-    ).toBe('kuaishou');
+    ).toBe('xiaohongshu');
     expect(
       root
         .querySelector('[aria-label="抖音主人账号（抖音号或主页链接）"]')
@@ -838,11 +849,11 @@ it('groups each platform with its own folded focus, limits and connection settin
   }
 });
 
-it('gives all three record groups and outgoing replies a platform identity for consistent colors', async () => {
+it('gives all platform record groups and outgoing replies a platform identity for consistent colors', async () => {
   const root = document.createElement('div');
   document.body.append(root);
   const controller = new AbortController();
-  const outbox = ['bilibili', 'douyin', 'kuaishou'].map((platform, i) => ({
+  const outbox = ['bilibili', 'douyin', 'xiaohongshu', 'tieba'].map((platform, i) => ({
     id: platform,
     platform,
     accountId: 'bot',
@@ -861,7 +872,7 @@ it('gives all three record groups and outgoing replies a platform identity for c
   try {
     await new Promise((r) => setTimeout(r, 0));
     await expandWorks(root);
-    for (const id of ['bilibili', 'douyin', 'kuaishou']) {
+    for (const id of ['bilibili', 'douyin', 'xiaohongshu']) {
       const group = root.querySelector('.sm-video[data-platform="' + id + '"]');
       expect(group).not.toBeNull();
       expect(group!.querySelector('.sm-outgoing')?.getAttribute('data-platform')).toBe(id);
@@ -930,13 +941,13 @@ it('offers free roaming per platform without changing another platform or public
   } as unknown as WebUiPanelContext);
   try {
     await new Promise((r) => setTimeout(r, 0));
-    const card = root.querySelector('.sm-platform-card[data-platform="kuaishou"]')!;
+    const card = root.querySelector('.sm-platform-card[data-platform="xiaohongshu"]')!;
     (card.querySelector('[data-roam-preset="free"]') as HTMLButtonElement).click();
     await new Promise((r) => setTimeout(r, 0));
-    expect(changes[0]['worlds.socialmedia.platforms.kuaishou.roaming.mode']).toBe('free');
+    expect(changes[0]['worlds.socialmedia.platforms.xiaohongshu.roaming.mode']).toBe('free');
     expect(
       Object.keys(changes[0]).every((k) =>
-        k.startsWith('worlds.socialmedia.platforms.kuaishou.roaming.'),
+        k.startsWith('worlds.socialmedia.platforms.xiaohongshu.roaming.'),
       ),
     ).toBe(true);
     expect(root.querySelectorAll('.sm-roaming [data-preset]')).toHaveLength(0);

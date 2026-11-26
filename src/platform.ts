@@ -18,6 +18,7 @@ export interface PublicVideo {
   unavailable?: boolean;
 }
 export interface PublicComment {
+  imageCount?: number;
   createdAt?: number;
   authorId?: string;
   author: string;
@@ -57,6 +58,7 @@ export interface PreparationNote {
 }
 export interface InboxItem {
   ownerAutoReply?: boolean;
+  imageCount?: number;
   id: string;
   platform: string;
   accountId: string;
@@ -103,11 +105,20 @@ export interface SendRecord {
   transport?: 'api' | 'browser';
   platformState?: number;
   visibility?: VisibilityReport;
+  visibilityFollowupAt?: string;
   detail?: string;
   inboxId?: string;
   roamId?: string;
   preparation?: PreparationNote;
 }
+export function hasIndependentOwnerComments(platform: string) {
+  return platform === 'bilibili' || platform === 'douyin' || platform === 'xiaohongshu';
+}
+
+export function isOwnerCommentRecord(record: Pick<SendRecord, 'platform' | 'focusOwnerId' | 'ownerAutoReply'>) {
+  return hasIndependentOwnerComments(record.platform) && Boolean(record.focusOwnerId || record.ownerAutoReply);
+}
+
 export interface NotificationPage {
   items: InboxItem[];
   cursor?: { id: string; time: number };
@@ -136,6 +147,7 @@ export interface Video {
 /** Each adapter owns platform-specific authentication, identifiers and HTTP endpoints. */
 export interface SocialPlatform {
   readonly id: string;
+  readonly paused?: string;
   normalizeTarget(value: unknown): CommentTarget;
   validRecipientId?(value: string): boolean;
   account(signal?: AbortSignal): Promise<Account>;
@@ -179,6 +191,8 @@ export interface SocialPlatform {
     receiptId: string,
     signal?: AbortSignal,
   ): Promise<VisibilityReport>;
+  commentImages?(target: CommentTarget, limit: number, signal?: AbortSignal): Promise<Array<{ atSec: number; bytes: Buffer }>>;
+  gallery?(video: Video, indices: number[], signal?: AbortSignal): Promise<Array<{ atSec: number; bytes: Buffer }>>;
   frames?(
     video: Video,
     times: number[],
@@ -198,7 +212,6 @@ export class PlatformError extends Error {
 export function describeDelivery(record: SendRecord) {
   const requiresBrowserSession =
     record.platform === 'douyin' ||
-    record.platform === 'kuaishou' ||
     record.transport === 'browser';
   if (record.status === 'sent') {
     if (record.visibility?.status === 'public')

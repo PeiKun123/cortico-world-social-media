@@ -9,7 +9,7 @@ const dirs: string[] = [];
 afterEach(() => {
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
 });
-function setup() {
+function setup(now = Date.parse('2026-10-23T03:00:00+09:00')) {
   const dir = mkdtempSync(join(tmpdir(), 'socialmedia-roaming-'));
   dirs.push(dir);
   const cfg = structuredClone(SOCIALMEDIA_DEFAULTS);
@@ -23,7 +23,6 @@ function setup() {
     minIntervalMinutes: 180,
     maxSessionMinutes: 20,
   });
-  let now = Date.parse('2026-10-23T03:00:00+09:00');
   const store = new SocialStore(dir);
   const roam = new Roaming(cfg, store, 'Asia/Tokyo', () => now);
   return {
@@ -112,10 +111,11 @@ describe('bounded autonomous reading', () => {
   });
 });
 
-it('keeps three independent platform quotas with one shared active session', () => {
+it('keeps four independent platform quotas with one shared active session', () => {
   const x = setup();
   x.cfg.platforms.douyin.enabled = true;
-  x.cfg.platforms.kuaishou.enabled = true;
+  x.cfg.platforms.xiaohongshu.enabled = true;
+  x.cfg.platforms.tieba.enabled = true;
   x.cfg.roaming.maxDailySessions = 1;
   const first = x.roam.offer('bilibili')!;
   expect(first.platform).toBe('bilibili');
@@ -124,9 +124,12 @@ it('keeps three independent platform quotas with one shared active session', () 
   const second = x.roam.offer('douyin')!;
   expect(second.platform).toBe('douyin');
   x.roam.finish(second.id, '读完');
-  const third = x.roam.offer('kuaishou')!;
-  expect(third.platform).toBe('kuaishou');
+  const third = x.roam.offer('xiaohongshu')!;
+  expect(third.platform).toBe('xiaohongshu');
   x.roam.finish(third.id, '读完');
+  const fourth = x.roam.offer('tieba')!;
+  expect(fourth.platform).toBe('tieba');
+  x.roam.finish(fourth.id, '读完');
   x.advance(4 * 3600000);
   expect(x.roam.offer('bilibili')).toBeUndefined();
   expect(x.roam.status().platforms.douyin.usedToday).toBe(1);
@@ -155,6 +158,21 @@ it('lets free roaming continue reading without daily, video or lifetime caps whi
   x.advance(3 * 3600000);
   expect(x.roam.offer('bilibili')).toBeDefined();
 });
+it('excludes old owner sends with a roaming ID from session and daily publish counts', () => {
+  const x = setup(Date.now());
+  x.cfg.roaming.maxDailyComments = 1;
+  const round = x.roam.offer('bilibili')!;
+  x.roam.begin(round.id);
+  x.roam.recordVideo(round.id, { id: 'av99', aid: '99', title: '普通作品', url: 'https://www.bilibili.com/video/av99/' });
+  const target = { oid: '88', type: 1, root: '0', parent: '0' };
+  x.store.reserve({ id: 'legacy-owner', platform: 'bilibili', accountId: '42', target, text: '说得好',
+    focusOwnerId: '7', roamId: round.id });
+  expect(() => x.roam.canPublish(round.id, '99', 'bilibili')).not.toThrow();
+  x.store.reserve({ id: 'ordinary', platform: 'bilibili', accountId: '42', target: { ...target, oid: '99' },
+    text: '说得好', roamId: round.id });
+  expect(() => x.roam.canPublish(round.id, '99', 'bilibili')).toThrow('本轮主动发言预算已用完');
+});
+
 it('binds a roaming session to its selected platform', () => {
   const x = setup();
   const r = x.roam.offer('bilibili')!;

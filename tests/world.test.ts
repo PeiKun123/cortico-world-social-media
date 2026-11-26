@@ -1,3 +1,4 @@
+// Offline fixtures: account 42, cookie values, device IDs and QR keys below are synthetic test inputs.
 import { SocialStore } from '../src/store.ts';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
@@ -144,8 +145,17 @@ it('offers one bounded idle round and does not interrupt a busy model or recent 
   }
 });
 
-it('offers a private draft review once before posting and keeps idempotent receipts', async () => {
+it.each([false, true])('reviews drafts and reuses receipts (resuming a rejected notification: %s)', async (resuming) => {
   const x = setup();
+  if (resuming) {
+    const store = new SocialStore(join(x.ctx.dataDir, 'socialmedia'));
+    const target = { oid: '99', type: 1, root: '100', parent: '101' };
+    store.addInbox({ id: 'reviewed', platform: 'bilibili', accountId: '42', authorId: '7', author: '路人',
+      text: '这个细节很用心', target, occurredAt: 1, status: 'pending' });
+    const id = 'bilibili:42:reply:reviewed';
+    store.reserve({ id, operationId: id, platform: 'bilibili', accountId: '42', inboxId: 'reviewed', target, text: '旧稿' });
+    store.updateSend(id, { status: 'rejected', detail: '尚未提交' });
+  }
   x.cfg.platforms.bilibili.posting.enabled = true;
   x.ctx.storeSecret('cookie', 'SESSDATA=test;bili_jct=test;DedeUserID=42');
   x.world.bilibili.video = async () => ({
@@ -212,13 +222,15 @@ it('offers a private draft review once before posting and keeps idempotent recei
   expect(misrouted.text).toMatch(/凭据.*目标|目标.*凭据/);
   expect(send).not.toHaveBeenCalled();
   final.briefId = revised.brief.id;
+  if (resuming) Object.assign(final, { inboxId: 'reviewed' });
   expect(JSON.parse((await call(final)).text!).status).toBe('sent');
   expect(JSON.parse((await call({ ...final, briefId: undefined })).text!).status).toBe('sent');
   expect(send).toHaveBeenCalledTimes(1);
   const state = (await x.world.webUi().invoke!('desk', 'status', [])) as {
     outbox: Array<{ preparation?: { briefId: string } }>;
   };
-  expect(state.outbox[0].preparation?.briefId).toBe(final.briefId);
+  expect(state.outbox.some(r => r.preparation?.briefId === final.briefId)).toBe(true);
+  expect(state.outbox.length).toBe(resuming ? 2 : 1);
 });
 
 it('validates settings only on the configuration panel, without exposing a model settings tool', async () => {
@@ -317,7 +329,7 @@ it('checks a top-level video editor from read history without requiring an old r
 it('routes enabled Douyin reads through its own adapter, preserving video and comment facts', async () => {
   const x = setup();
   x.cfg.platforms.douyin.enabled = true;
-  const id = '7697799441646256819';
+  const id = '7000000000000000001';
   x.world.douyin.video = vi.fn(async () => ({
     id,
     aid: id,
@@ -418,12 +430,43 @@ it('includes saved Douyin sends in the all-platform desk even when over 50 newer
   expect(state.outbox.some((r: any) => r.id === 'old-dy')).toBe(true);
 });
 
-it('exposes Kuaishou connection and independent owner focus in the desk snapshot', async () => {
+it('keeps retired platform records on disk while excluding them from the desk and tool routing', async () => {
   const x = setup();
-  const state = (await x.world.webUi().invoke!('desk', 'status', [])) as any;
-  expect(state.focusPlatforms.kuaishou).toBeDefined();
-  expect(state.kuaishou.capabilities.frames).toBe(false);
-  expect(state.plannedPlatforms).not.toContain('kuaishou');
+  const retired = 'kuaishou';
+  x.cfg.platforms[retired] = { ...x.cfg.platforms.bilibili, enabled: true };
+  const store = new SocialStore(join(x.ctx.dataDir, 'socialmedia'));
+  store.addInbox({
+    id: 'old-platform-comment', platform: retired, accountId: '42', authorId: '43',
+    author: '旧访客', text: '旧记录', target: { oid: '12345', root: '0', parent: '0', type: 3 },
+    occurredAt: 12345, status: 'pending',
+  });
+  const state = await x.world.webUi().invoke!('desk', 'status', []) as any;
+  expect(state.platforms.map((platform: { id: string }) => platform.id))
+    .toEqual(['bilibili', 'douyin', 'tieba', 'xiaohongshu']);
+  expect(state.focusPlatforms[retired]).toBeUndefined();
+  expect(state.pending).toBe(0);
+  expect(state.inbox).toEqual([]);
+  expect(store.getInbox('old-platform-comment')).toBeDefined();
+});
+
+it.each(['tieba', 'xiaohongshu'] as const)('binds the logged-in %s account and enables browsing under the shared switch', async (platform) => {
+  const x = setup();
+  const ui = x.world.webUi();
+  x.ctx.persist = patch => Object.assign(x.cfg, patch);
+  x.cfg.enabled = true;
+  x.cfg.platforms[platform].enabled = true;
+  const adapter = x.world['publicAdapters'][platform];
+  const account = { id: 'bot', name: '登录账号' };
+  const reconnect = vi.spyOn(adapter, 'reconnect').mockResolvedValue(account);
+  await expect(ui.invoke!('settings', 'expressionPublicConnect', [platform]))
+    .resolves.toMatchObject({ message: expect.stringContaining('登录账号') });
+  expect(reconnect).toHaveBeenCalledTimes(1);
+  const state = await ui.invoke!('settings', 'status', ['compact']) as any;
+  expect(state.publicPlatforms[platform]).toMatchObject({ bound: true, account, posting: { enabled: false } });
+  expect(state.roaming.platforms[platform].limits.enabled).toBe(false);
+  x.cfg.roaming.enabled = true;
+  const enabled = await ui.invoke!('settings', 'status', ['compact']) as any;
+  expect(enabled.roaming.platforms[platform].limits.enabled).toBe(true);
 });
 
 it('uses cached frames for repeated observations and falls back to text after the daily budget', async () => {
@@ -464,13 +507,8 @@ it('uses cached frames for repeated observations and falls back to text after th
 
 it('can close a platform login window even after the platform was disabled', async () => {
   const x = setup();
-  const ks = vi.spyOn(x.world.kuaishou, 'closeLogin').mockResolvedValue(undefined),
-    dy = vi.spyOn(x.world.douyin, 'closeLogin').mockResolvedValue(undefined);
-  await expect(x.world.webUi().invoke!('settings', 'kuaishouClose', [])).resolves.toMatchObject({
-    detail: expect.stringContaining('已关闭'),
-  });
+  const dy = vi.spyOn(x.world.douyin, 'closeLogin').mockResolvedValue(undefined);
   await x.world.webUi().invoke!('settings', 'douyinClose', []);
-  expect(ks).toHaveBeenCalledTimes(1);
   expect(dy).toHaveBeenCalledTimes(1);
 });
 
@@ -504,15 +542,16 @@ it('reports an uncertain receipt as pending confirmation rather than a failed to
 
 it('labels video search explicitly so nickname matches are not owner identity results', async () => {
   const x = setup();
-  x.cfg.platforms.kuaishou.enabled = true;
-  vi.spyOn(x.world.kuaishou, 'search').mockResolvedValue({
+  x.cfg.platforms.douyin.enabled = true;
+  vi.spyOn(x.world.douyin, 'search').mockResolvedValue({
     items: [],
     page: 1,
     limited: true,
     reason: '官网首屏结果',
+    externalContent: true,
   });
   const tool = x.world.tools().find((t) => t.name === 'socialmedia_search')!;
-  const result = await tool.handler({ platform: 'kuaishou', query: '主人昵称' }, {} as never);
+  const result = await tool.handler({ platform: 'douyin', query: '主人昵称' }, {} as never);
   if (typeof result === 'string') throw Error('Expected structured outcome');
   expect(result.failed).not.toBe(true);
   expect(JSON.parse(result.text!)).toMatchObject({
@@ -631,6 +670,66 @@ it('prioritizes unresolved notifications before offering another idle roaming ro
     vi.useRealTimers();
   }
 });
+it('keeps scheduling background scans when a retired platform has legacy settings', async () => {
+  vi.useFakeTimers();
+  const { world, cfg } = setup();
+  Object.assign(cfg.platforms, { kuaishou: { enabled: true } });
+  const sync = vi.spyOn(world as any, 'sync').mockResolvedValue(true);
+  try {
+    await world.start({} as WorldHost);
+    await vi.advanceTimersByTimeAsync(12000);
+    expect(sync).toHaveBeenCalledTimes(2);
+  } finally {
+    await world.stop();
+    vi.useRealTimers();
+  }
+});
+
+it('lets Tieba roam while a connected Douyin reply remains pending', async () => {
+  const x = setup(), world = x.world as any, service = world.service;
+  const events: Array<{ type: string; text: string }> = [];
+  const tiebaBot = 'b'.repeat(24);
+  x.cfg.roaming.enabled = true;
+  x.cfg.roaming.idleMinutes = 1;
+  x.cfg.platforms.douyin.enabled = true;
+  x.cfg.platforms.douyin.monitor.enabled = true;
+  x.cfg.platforms.douyin.posting.enabled = true;
+  x.cfg.platforms.tieba.enabled = true;
+  x.cfg.platforms.tieba.roaming!.idleMinutes = 1;
+  x.cfg.platforms.tieba.corpusWeight = 'light';
+  x.cfg.publicAccounts = { tieba: tiebaBot };
+  vi.spyOn(service.platform('douyin'), 'account').mockResolvedValue({ id: 'douyin-bot', name: 'Bot' });
+  vi.spyOn(service.platform('tieba'), 'account').mockResolvedValue({ id: tiebaBot, name: 'Bot' });
+  await service.connect('douyin');
+  await service.connect('tieba');
+  service.store.addInbox({
+    id: 'stalled-douyin', platform: 'douyin', accountId: 'douyin-bot',
+    authorId: '7', author: '访客', text: '这段桥是怎么搭的？',
+    target: { oid: '99', type: 2, root: '100', parent: '100' },
+    occurredAt: 1, status: 'pending', delivered: true,
+  });
+  world.host = {
+    store: { range: () => [] },
+    pushEvent: async (event: { type: string; text: string }) => {
+      events.push(event);
+      return { cursor: events.length };
+    },
+  };
+  world.idleSince = Date.now() - 120000;
+  try {
+    expect(service.pendingReplies().map((item: { id: string }) => item.id)).toEqual(['stalled-douyin']);
+    await world.maybeOfferRoam();
+    expect(events).toEqual([expect.objectContaining({
+      type: 'socialmedia.roam', text: expect.stringContaining('"platform":"tieba"'),
+    })]);
+    expect(service.store.inbox()).toEqual([expect.objectContaining({
+      id: 'stalled-douyin', status: 'pending',
+    })]);
+  } finally {
+    await x.world.stop();
+  }
+});
+
 it('keeps notification preparation independent from an expired roaming context', async () => {
   const x = setup();
   x.ctx.storeSecret('cookie', 'SESSDATA=test');
@@ -889,15 +988,15 @@ it('prepares account-bound dynamic drafts, uses separate publishing opt-in and r
   x.cfg.platforms.bilibili.dynamics!.allowPublishing = true;
   const send = vi.spyOn(x.world.browserSender, 'publishDynamic').mockResolvedValue({
     status: 'sent',
-    dynamicId: '1261990610011684873',
-    url: 'https://t.bilibili.com/1261990610011684873',
+    dynamicId: '7000000000000000002',
+    url: 'https://t.bilibili.com/7000000000000000002',
   });
   const result = (await tool.handler({ action: 'publish', draftId: draft.id }, {} as never)) as any;
   expect(JSON.parse(result.text)).toMatchObject({ status: 'sent' });
   await tool.handler({ action: 'publish', draftId: draft.id }, {} as never);
   expect(send).toHaveBeenCalledTimes(1);
   const posts = (await tool.handler({ action: 'posts' }, {} as never)) as any;
-  expect(JSON.parse(posts.text).items[0].dynamicId).toBe('1261990610011684873');
+  expect(JSON.parse(posts.text).items[0].dynamicId).toBe('7000000000000000002');
   expect(
     await tool.handler({ action: 'prepare', text: '想分享', mentionFocus: true }, {} as never),
   ).toMatchObject({ failed: true, text: expect.stringContaining('允许@') });
@@ -1048,6 +1147,146 @@ it('derives a missing reply platform from the saved inbox and refuses a conflict
   expect(absent.text).toContain('收件箱消息不存在');
   const noTarget = (await tool.handler({ draft: '你好' }, {} as never)) as any;
   expect(noTarget.text).toContain('缺少平台platform');
+});
+
+it('polls connected Xiaohongshu owner works before pending replies from another platform wake the model', async () => {
+  const x = setup(), world = x.world as any;
+  const cfg = x.cfg.platforms.xiaohongshu, bot = '2'.repeat(24);
+  cfg.enabled = true;
+  cfg.focus = { ...x.cfg.focus, enabled: true, account: 'https://www.xiaohongshu.com/user/profile/' + '3'.repeat(24) };
+  x.cfg.publicAccounts = { xiaohongshu: bot };
+  const service = world.service;
+  vi.spyOn(service.platform('xiaohongshu'), 'account').mockResolvedValue({ id: bot, name: 'Bot' });
+  await service.connect('xiaohongshu');
+  const order: string[] = [];
+  vi.spyOn(service.focusFor('xiaohongshu'), 'poll').mockImplementation(async () => { order.push('owner'); });
+  vi.spyOn(service, 'poll').mockImplementation(async () => { order.push('poll'); return true; });
+  vi.spyOn(world, 'deliverInbox').mockImplementation(async () => { order.push('inbox'); world.phase = 'model'; });
+  await world.sync();
+  expect(order.slice(0, 3)).toEqual(['owner', 'poll', 'inbox']);
+});
+
+it('checks owner comments while ordinary sync waits and delivers each ready platform without waiting for the rest', async () => {
+  vi.useFakeTimers();
+  const x = setup(), world = x.world as any;
+  let finishOrdinary!: () => void;
+  let finishSlow!: () => void;
+  try {
+    x.cfg.enabled = true;
+    for (const platform of ['bilibili', 'douyin', 'xiaohongshu']) {
+      const cfg = x.cfg.platforms[platform];
+      cfg.enabled = true;
+      cfg.posting.enabled = true;
+      const focus = { ...x.cfg.focus, enabled: true, autoReplyNewComments: true, account: '7' };
+      if (platform === 'bilibili') x.cfg.focus = focus;
+      else cfg.focus = focus;
+    }
+    const ordinary = new Promise<void>(resolve => { finishOrdinary = resolve; });
+    vi.spyOn(world, 'sync').mockImplementation(() => ordinary);
+    const slow = new Promise<void>(resolve => { finishSlow = resolve; });
+    const poll = vi.spyOn(world, 'pollOwnerFocus').mockImplementation(async (platform) => {
+      if (platform === 'bilibili') await slow;
+    });
+    const deliver = vi.spyOn(world, 'deliverInbox').mockResolvedValue(undefined);
+    await world.start({} as WorldHost);
+    await vi.advanceTimersByTimeAsync(15000);
+    expect(poll.mock.calls.map(args => args[0])).toEqual(['bilibili', 'douyin', 'xiaohongshu']);
+    expect(deliver).toHaveBeenCalledWith(true);
+  } finally {
+    finishSlow?.();
+    finishOrdinary?.();
+    await world.stop();
+    vi.useRealTimers();
+  }
+});
+
+it('reads verified owner comments without consuming the active roaming budget', async () => {
+  const x = setup();
+  x.cfg.focus.enabled = true;
+  x.cfg.focus.account = '7';
+  x.cfg.roaming.enabled = true;
+  x.cfg.roaming.maxVideosPerSession = 2;
+  x.cfg.roaming.maxCommentsPerVideo = 1;
+  const service = (x.world as any).service;
+  const adapter = service.platform('bilibili');
+  vi.spyOn(adapter, 'account').mockResolvedValue({ id: '42', name: 'Bot' });
+  await service.connect('bilibili');
+  const ownerWork = { id: 'av88', aid: '88', title: '主人作品', url: 'https://www.bilibili.com/video/av88/' };
+  const otherWork = { id: 'av99', aid: '99', title: '普通作品', url: 'https://www.bilibili.com/video/av99/' };
+  service.store.saveFocusWorks([{
+    platform: 'bilibili', accountId: '42', ownerId: '7',
+    video: { ...ownerWork, updatedAt: new Date().toISOString() },
+  }]);
+  const round = service.roaming.offer('bilibili');
+  service.roaming.begin(round.id);
+  for (const work of [ownerWork, otherWork]) service.roaming.recordVideo(round.id, work);
+  vi.spyOn(adapter, 'comments').mockResolvedValue({ items: [{ text: '一' }, { text: '二' }] });
+  const tool = x.world.tools().find(t => t.name === 'socialmedia_comments')!;
+  const read = (oid: string) => tool.handler({
+    platform: 'bilibili', roamId: round.id, target: { oid, type: 1, root: '0', parent: '0' },
+  }, {} as never);
+  for (let i = 0; i < 2; i++) {
+    const result = await read('88') as { text: string };
+    expect(JSON.parse(result.text).items).toHaveLength(2);
+  }
+  const result = await read('99') as { text: string };
+  expect(JSON.parse(result.text).items).toHaveLength(1);
+  expect(await read('99')).toMatchObject({ failed: true, text: expect.stringContaining('预算已用完') });
+  expect(service.roaming.session(round.id).videos.map((v: { commentsRead: number }) => v.commentsRead)).toEqual([0, 1]);
+});
+
+it('delivers every recognized photo from a comment even with the usual one-call budget when unlimited', async () => {
+  const x = setup();
+  x.cfg.media.maxDailyVisualCalls = 1;
+  x.cfg.media.unlimitedDailyVisualCalls = true;
+  const service = (x.world as any).service;
+  const adapter = service.platform('bilibili');
+  const image = Buffer.from([255, 216, 255, 217]);
+  vi.spyOn(adapter, 'comments').mockImplementation(async (target: any) => ({
+    items: [{ id: target.parent, author: '读者', authorId: '43', text: '这一排是什么', target, imageCount: 5 }],
+  }));
+  const capture = vi.spyOn(adapter, 'commentImages').mockImplementation(async (_target: any, limit: any) =>
+    Array.from({ length: limit }, (_, index) => ({ atSec: index + 1, bytes: image })));
+  const read = x.world.tools().find(t => t.name === 'socialmedia_comments')!;
+  for (const id of ['100', '101']) {
+    const target = { oid: '99', type: 1, root: id, parent: id };
+    const result = await read.handler({ platform: 'bilibili', target }, {} as never) as any;
+    expect(result.blobs).toHaveLength(5);
+    expect(JSON.parse(result.text).imageObservation.observed).toEqual([1, 2, 3, 4, 5]);
+  }
+  expect(capture.mock.calls.map(call => call[1])).toEqual([5, 5]);
+});
+
+it('keeps inbox comment pictures and requires the exact image before preparing a Xiaohongshu reply', async () => {
+  const x = setup();
+  const bot = '2'.repeat(24), oid = '3'.repeat(24), id = '4'.repeat(24);
+  const target = { oid, type: 5, root: id, parent: id };
+  x.cfg.platforms.xiaohongshu.enabled = true;
+  x.cfg.publicAccounts = { xiaohongshu: bot };
+  const service = (x.world as any).service;
+  const adapter = service.platform('xiaohongshu');
+  vi.spyOn(adapter, 'account').mockResolvedValue({ id: bot, name: 'Bot' });
+  await service.connect('xiaohongshu');
+  const parent = { id, author: '读者', authorId: '5'.repeat(24), text: '这一段挺像的', target, imageCount: 1 };
+  service.store.rememberComment(parent);
+  service.store.addInbox({ ...parent, id: 'old-photo-inbox', platform: 'xiaohongshu', accountId: bot, occurredAt: 1, status: 'pending' });
+  // An inbox record created on an older version has no image count.
+  service.store.updateInbox('old-photo-inbox', { imageCount: undefined });
+  vi.spyOn(adapter, 'comments').mockResolvedValue({ items: [parent] });
+  vi.spyOn(adapter, 'commentImages').mockResolvedValue([{ atSec: 1, bytes: Buffer.from([255, 216, 255, 217]) }]);
+  const prepare = x.world.tools().find(t => t.name === 'socialmedia_prepare')!;
+  const read = x.world.tools().find(t => t.name === 'socialmedia_comments')!;
+  const draft = { platform: 'xiaohongshu', inboxId: 'old-photo-inbox', draft: '这一段动作确实像。' };
+  const blocked = await prepare.handler(draft, {} as never) as any;
+  expect(blocked.failed).toBe(true);
+  expect(blocked.text).toContain('这条评论附有图片');
+  expect(service.store.comment(target).imageCount).toBe(1);
+  const picture = await read.handler({ platform: 'xiaohongshu', target }, {} as never) as any;
+  expect(picture.blobs).toHaveLength(1);
+  expect(JSON.parse(picture.text).imageObservation.observed).toEqual([1]);
+  const prepared = await prepare.handler(draft, {} as never) as any;
+  expect(prepared.failed).not.toBe(true);
+  expect(JSON.parse(prepared.text).target).toEqual(target);
 });
 
 it('checks recommendation reading locally without posting or starting an autonomous round', async () => {

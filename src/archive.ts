@@ -1,8 +1,11 @@
+import { ROAMING_PLATFORMS } from './config.ts';
 import { createRequire } from 'node:module';
 
 import { existsSync, lstatSync, statSync, realpathSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { SendRecord, CommentTarget } from './platform.ts';
+const activePlatformFilter = 'platform IN (' + ROAMING_PLATFORMS.map(() => '?').join(', ') + ')';
+
 export class SendArchive {
   private parent: string;
   constructor(private file: string) {
@@ -120,8 +123,8 @@ export class SendArchive {
     return this.withDb((db) =>
       (
         db
-          .prepare('SELECT payload FROM sends ORDER BY created_at DESC,rowid DESC LIMIT ? OFFSET ?')
-          .all(limit, offset) as Array<{ payload: string }>
+          .prepare('SELECT payload FROM sends WHERE ' + activePlatformFilter + ' ORDER BY created_at DESC,rowid DESC LIMIT ? OFFSET ?')
+          .all(...ROAMING_PLATFORMS, limit, offset) as Array<{ payload: string }>
       ).map((r) => JSON.parse(r.payload) as SendRecord),
     );
   }
@@ -130,9 +133,9 @@ export class SendArchive {
     return this.withDb((db) => {
       const s = db
         .prepare(
-          "SELECT COUNT(*) AS count,SUM(CASE WHEN status='sent' THEN 1 ELSE 0 END) AS sent FROM sends",
+          "SELECT COUNT(*) AS count,SUM(CASE WHEN status='sent' THEN 1 ELSE 0 END) AS sent FROM sends WHERE " + activePlatformFilter,
         )
-        .get() as { count: number; sent: number };
+        .get(...ROAMING_PLATFORMS) as { count: number; sent: number };
       return { count: s.count, sent: s.sent ?? 0, bytes: statSync(this.file).size };
     });
   }

@@ -18,10 +18,10 @@ export const SOCIALMEDIA: WorldDefinition<SocialMediaConfigSection> = {
       socialmedia_roam: '查看闲逛额度与心得，开始、结束或跳过本轮。',
       socialmedia_status: '查看连接、平台开关和待处理数量。',
       socialmedia_feed:
-        '读取抖音下一条或快手官网推荐候选，按本轮额度记录；快手元数据不代表看过画面。',
-      socialmedia_search: '检索B站或实验接入的抖音、快手；首屏范围与能力由平台返回。',
+        '读取抖音、贴吧或小红书的官网推荐作品候选，按本轮额度记录。',
+      socialmedia_search: '检索已启用的平台；搜索范围由平台返回。',
       socialmedia_video: '查看详情及账号可访问的字幕。',
-      socialmedia_watch: '按时间抽取视频分镜，或按编号分批读取抖音图文。',
+      socialmedia_watch: '按时间抽取可访问的视频分镜，或读取抖音、贴吧、小红书图文。',
       socialmedia_comments: '读取评论页或楼中楼。',
       socialmedia_inbox: '检索通知与发送回执，或标记消息已处理。',
       socialmedia_publish: '发布公开评论并保存实际结果。',

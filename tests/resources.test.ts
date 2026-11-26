@@ -41,6 +41,18 @@ describe('owned media resources', () => {
     expect((await restarted.observe('bilibili:99:2', capture)).cached).toBe(true);
     expect(calls).toBe(1);
   });
+  it('applies a separate bounded or unlimited daily count per platform', async () => {
+    const x = await setup({ maxDailyVisualCalls: 1 });
+    const capture = async () => frames;
+    const unlimited = { id: 'tieba', daily: 'unlimited' } as const;
+    const bounded = { id: 'bilibili', daily: 'inherit' } as const;
+    await x.r.observe('post1', capture, undefined, unlimited);
+    await x.r.observe('post2', capture, undefined, unlimited);
+    await x.r.observe('video1', capture, undefined, bounded);
+    await expect(x.r.observe('video2', capture, undefined, bounded)).rejects.toThrow('今日');
+    const reopened = new MediaResources(x.dir, () => x.cfg, 'UTC');
+    expect(reopened.status().byPlatform).toEqual({ tieba: 2, bilibili: 1 });
+  });
   it('never starts another capture after the daily budget is exhausted', async () => {
     const x = await setup({ maxDailyVisualCalls: 1 });
     await x.r.observe('one', async () => frames);

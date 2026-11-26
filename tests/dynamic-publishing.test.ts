@@ -121,6 +121,7 @@ it('allows a new explicit draft after a known rejection but never reuses or retr
   expect((await p.publish('42', first.id)).status).toBe('rejected');
   const retry = p.prepare('42', '同一条测试');
   expect(retry.id).not.toBe(first.id);
+  expect((await p.publish('42', retry.id)).status).toBe('sent');
   expect((await p.publish('42', first.id)).status).toBe('rejected');
-  expect(x.send).toHaveBeenCalledTimes(1);
+  expect(x.send).toHaveBeenCalledTimes(2);
 });

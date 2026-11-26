@@ -73,7 +73,7 @@ export class Conversation {
         advice.push('视频详情暂未补齐，沿用已知原文，不猜测画面或内容。');
       }
     let parent = target.parent !== '0' ? this.store.comment(target) : undefined;
-    if (parent && !parent.text) parent = undefined;
+    if (parent && !parent.text && !parent.imageCount) parent = undefined;
     let nearby: ConversationBrief['nearby'] = [];
     if (target.parent !== '0' && !parent)
       try {

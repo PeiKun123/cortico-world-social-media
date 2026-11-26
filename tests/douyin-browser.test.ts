@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { chromium, type Browser } from 'playwright-core';
-import { DouyinPlatform } from '../src/platforms/douyin.ts';
+import { DouyinPlatform, type DouyinVerificationCheckpoint } from '../src/platforms/douyin.ts';
 import * as windowVisibility from '../src/platforms/windows-browser.ts';
 import { findBrowserExecutable } from '../src/platforms/bilibili-browser.ts';
 const id = '7697799441646256819';
@@ -21,12 +21,15 @@ describe.skipIf(!findBrowserExecutable())('Douyin real-browser offline boundarie
       hideCompatibilityWindow?: boolean;
       coldFeed?: boolean;
       verification?: boolean;
+      checkpoint?: { load(): DouyinVerificationCheckpoint | undefined; save(value?: DouyinVerificationCheckpoint): void };
       userSearch?: boolean;
       needsRefresh?: boolean;
       movingIcon?: boolean;
+      delayedCommentIcon?: boolean;
       autoCollapse?: boolean;
       hiddenList?: boolean;
       thread?: boolean;
+      commentPictures?: boolean;
       slowPanel?: boolean;
       navigationFailure?: boolean;
       laterThread?: boolean;
@@ -36,6 +39,7 @@ describe.skipIf(!findBrowserExecutable())('Douyin real-browser offline boundarie
       noSlash?: boolean;
       collapsed?: boolean;
       searchPlaceholder?: boolean;
+      textareaComposer?: boolean;
       images?: boolean;
       gallery?: boolean;
       embeddedGallery?: boolean;
@@ -75,6 +79,7 @@ describe.skipIf(!findBrowserExecutable())('Douyin real-browser offline boundarie
       () => options.compatibilityWindow ?? false,
       () => 15,
       () => options.hideCompatibilityWindow ?? false,
+      options.checkpoint,
     );
     const launch = vi
       .spyOn(chromium, 'launchPersistentContext')
@@ -164,12 +169,14 @@ describe.skipIf(!findBrowserExecutable())('Douyin real-browser offline boundarie
                   {
                     cid: '88',
                     text: '好可爱',
+                    ...(options.commentPictures ? { image_list: [{ origin_url: { url_list: ['https://p3-sign.douyinpic.com/root.jpg'] } }] } : {}),
                     ...(options.thread
                       ? {
                           reply_comment: [
                             {
                               cid: '99',
                               text: '好可爱',
+                              ...(options.commentPictures ? { image_list: [{ origin_url: { url_list: ['https://p3-sign.douyinpic.com/child.jpg'] } }] } : {}),
                               reply_id: '88',
                               user: {
                                 uid: '9',
@@ -270,8 +277,14 @@ describe.skipIf(!findBrowserExecutable())('Douyin real-browser offline boundarie
                       : '') +
                     (options.collapsed
                       ? 'document.querySelector("[contenteditable]").outerHTML="<span id=activate>' +
-                         (options.searchPlaceholder ? '留下你的评论吧' : '留下你的精彩评论吧') +
-                         '</span>";document.querySelector("#activate").onclick=()=>{document.querySelector("#activate").outerHTML="<div contenteditable=true></div>";document.querySelector("[contenteditable]").onkeydown=e=>{if(e.key==="Enter"){e.preventDefault();document.querySelector("#send").click();}};};document.querySelector("#send").parentElement.classList.add("comment-input-inner-container");document.querySelector("#send").outerHTML="<div class=commentInput-right-ct><span id=send><svg width=32 height=32><path fill=#FE2C55 d=M0,0L32,32></path></svg></span></div>";'
+                         (options.textareaComposer ? '说点什么…' : options.searchPlaceholder ? '留下你的评论吧' : '留下你的精彩评论吧') +
+                         '</span>";document.querySelector("#activate").onclick=()=>{document.querySelector("#activate").outerHTML="' + (options.textareaComposer ? '<textarea></textarea>' : '<div contenteditable=true></div>') + '";document.querySelector("textarea,[contenteditable]").onkeydown=e=>{if(e.key==="Enter"){e.preventDefault();document.querySelector("#send").click();}};};document.querySelector("#send").parentElement.classList.add("comment-input-inner-container");document.querySelector("#send").outerHTML="<div class=commentInput-right-ct><span id=send><svg width=32 height=32><path fill=#FE2C55 d=M0,0L32,32></path></svg></span></div>";'
+                      : '') +
+                    (options.textareaComposer
+                      ? 'const box=document.querySelector(".comment-input-inner-container");box.hidden=true;const toggle=document.querySelector("[data-e2e=feed-comment-icon]");toggle.style.cssText="position:fixed;top:20px;left:20px;z-index:2";const behind=toggle.cloneNode(true);behind.style.zIndex="1";toggle.before(behind);toggle.onclick=()=>{box.hidden=false};'
+                      : '') +
+                    (options.delayedCommentIcon
+                      ? 'const icon=document.querySelector("[data-e2e=feed-comment-icon]");const slot=document.createComment("mount");icon.replaceWith(slot);setTimeout(()=>slot.replaceWith(icon),3500);'
                       : '') +
                     (options.feed
                       ? 'document.addEventListener("keydown",()=>{document.querySelector("[data-e2e=video-desc] a").href="https://www.douyin.com/search/game?aweme_id=7697799441646256821";document.querySelector("[data-e2e=video-desc] a").textContent="#新游戏";});'
@@ -280,7 +293,7 @@ describe.skipIf(!findBrowserExecutable())('Douyin real-browser offline boundarie
                     (options.noSlash ? '' : '/') +
                     '",{method:"POST",body:new URLSearchParams({aweme_id:"' +
                     (options.wrongVideo ? '123' : id) +
-                    '",text:document.querySelector("[contenteditable]").textContent' +
+                    '",text:(document.querySelector("textarea")?.value ?? document.querySelector("[contenteditable]").textContent)' +
                      (options.wrongText ? '+"改动"' : '') +
                      ',reply_id:(window.replyRoot||"0"),reply_to_reply_id:' +
                     (options.wrongReply ? '"100"' : '(window.replyParent||"0")') +
@@ -527,6 +540,17 @@ describe.skipIf(!findBrowserExecutable())('Douyin real-browser offline boundarie
       await f.cleanup();
     }
   });
+  it('opens a comment entry mounted after the work details without reloading the work', async () => {
+    const f = await fixture({ delayedCommentIcon: true, thread: true });
+    try {
+      const page = await f.adapter.comments(target, 1);
+      expect(page.items.some(row => row.id === '88')).toBe(true);
+      expect(f.navigations.filter(url => url.includes('modal_id='))).toHaveLength(1);
+      expect(f.accepted()).toBe(0);
+    } finally {
+      await f.cleanup();
+    }
+  });
   it('checks sender identity without navigating away from the already prepared thread page', async () => {
     const f = await fixture({ thread: true, ssr: true });
     try {
@@ -650,6 +674,27 @@ describe.skipIf(!findBrowserExecutable())('Douyin real-browser offline boundarie
       await f.cleanup();
     }
   });
+  it('reads only the selected Douyin comment pictures after identifying the rendered thread', async () => {
+    const f = await fixture({ thread: true, commentPictures: true });
+    const requests: string[] = [];
+    const fetchImage = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
+      requests.push(String(url));
+      expect(init?.credentials).toBe('omit');
+      expect(init?.redirect).toBe('error');
+      return new Response(Uint8Array.from([255, 216, 255, 217]), { headers: { 'content-type': 'image/jpeg' } });
+    });
+    try {
+      const exact = { ...target, root: '88', parent: '99' };
+      const result = await f.adapter.comments(exact);
+      expect(result.items).toContainEqual(expect.objectContaining({ id: '99', imageCount: 1 }));
+      expect((await f.adapter.commentImages(exact, 12)).map(frame => frame.atSec)).toEqual([1]);
+      expect(requests).toEqual(['https://p3-sign.douyinpic.com/child.jpg']);
+      expect(f.accepted()).toBe(0);
+    } finally {
+      fetchImage.mockRestore();
+      await f.cleanup();
+    }
+  });
   it('reads server-rendered facts and exact comment text without a detail or comment API response', async () => {
     const f = await fixture({ ssr: true });
     try {
@@ -742,8 +787,8 @@ describe.skipIf(!findBrowserExecutable())('Douyin real-browser offline boundarie
       await f.cleanup();
     }
   });
-  it.each([false, true])('activates either official placeholder (search=%s) and clicks its scoped send icon', async (searchPlaceholder) => {
-    const f = await fixture({ collapsed: true, searchPlaceholder });
+  it.each(['original', 'short', 'textarea'])('activates the comment editor (%s) and clicks its scoped send icon', async variant => {
+    const f = await fixture({ collapsed: true, searchPlaceholder: variant === 'short', textareaComposer: variant === 'textarea' });
     try {
       expect(await f.adapter.send(target, '这个细节好可爱', undefined, '42')).toMatchObject({
         receiptId: '7697799441646256820',
@@ -908,6 +953,32 @@ describe.skipIf(!findBrowserExecutable())('Douyin real-browser offline boundarie
       await f.cleanup();
     }
   });
+  it('keeps a blocked search paused across a restart and opens only its original page for the user', async () => {
+    let saved: DouyinVerificationCheckpoint | undefined;
+    const checkpoint = { load: () => saved, save: (value?: DouyinVerificationCheckpoint) => { saved = value; } };
+    const original = await fixture({ verification: true, checkpoint });
+    const phrase = '挤塑板 刻 石头 墙';
+    try {
+      await expect(original.adapter.search(phrase)).rejects.toThrow('人工验证');
+      expect(saved?.url).toBe('https://www.douyin.com/search/' + encodeURIComponent(phrase) + '?type=video');
+      expect(saved?.verification.paused).toBe(true);
+    } finally {
+      await original.cleanup();
+    }
+    const restarted = await fixture({ verification: true, checkpoint });
+    try {
+      restarted.adapter.reset();
+      expect(restarted.adapter.status().verification?.paused).toBe(true);
+      await expect(restarted.adapter.search(phrase)).rejects.toThrow('等待处理');
+      expect(restarted.navigations).toEqual([]);
+      await restarted.adapter.openLogin();
+      expect(restarted.navigations).toContain(saved?.url);
+      expect(restarted.adapter.status().verification?.paused).toBe(true);
+    } finally {
+      await restarted.cleanup();
+    }
+  });
+
   it('remembers the blocked work, pauses unattended retries and opens that work for manual verification', async () => {
     const options = { verification: true, releaseAfterTask: true };
     const f = await fixture(options);

@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { officialCommentImage, readCommentImages } from '../resources.ts';
 import {
   PlatformError,
   type Account,
@@ -92,6 +93,13 @@ export function safeAssetUrl(input: string): string {
   )
     throw new PlatformError('素材地址不属于 B站媒体域名。');
   return u.href;
+}
+function bilibiliCommentPictures(row: Json) {
+  const pictures = row.content?.pictures;
+  return Array.isArray(pictures) ? pictures.slice(0, 12).flatMap(picture => {
+    const url = officialCommentImage(picture?.img_src, /^(?:i\d*\.hdslb\.com|archive\.biliimg\.com)$/i);
+    return url ? [url] : [];
+  }) : [];
 }
 function cleanText(v: unknown, max = 8000) {
   return String(v ?? '')
@@ -415,6 +423,7 @@ export class BilibiliPlatform implements SocialPlatform {
       authorId: String(r.mid ?? r.member?.mid ?? ''),
       author: cleanText(r.member?.uname, 80),
       text: cleanText(r.content?.message),
+      imageCount: bilibiliCommentPictures(r).length || undefined,
       createdAt: r.ctime,
       target: { oid: t.oid, type: t.type, root: String(r.root || r.rpid), parent: String(r.rpid) },
       replies: (r.replies ?? []).slice(0, 5).map((s: Json) => ({
@@ -422,6 +431,7 @@ export class BilibiliPlatform implements SocialPlatform {
         authorId: String(s.mid ?? s.member?.mid ?? ''),
         author: cleanText(s.member?.uname, 80),
         text: cleanText(s.content?.message),
+        imageCount: bilibiliCommentPictures(s).length || undefined,
         target: {
           oid: t.oid,
           type: t.type,
@@ -442,6 +452,26 @@ export class BilibiliPlatform implements SocialPlatform {
       root: d.root ? project(d.root) : undefined,
       items: (d.replies ?? []).map(project),
     };
+  }
+  async commentImages(raw: CommentTarget, limit: number, signal?: AbortSignal) {
+    const target = normalizeTarget(raw);
+    if (target.parent === '0') throw new PlatformError('请指定一个有配图的评论楼层。');
+    for (let pn = 1; pn <= 3; pn++) {
+      const page = await this.request('/x/v2/reply/reply',
+        { oid: target.oid, type: target.type, root: target.root, pn, ps: 20 }, signal);
+      const row = [page.root, ...(page.replies ?? [])].filter(Boolean).find((entry: Json) => {
+        const id = String(entry.rpid_str ?? entry.rpid ?? '');
+        const root = String(entry.root ?? '0');
+        return id === target.parent && (root === '0' ? id : root) === target.root;
+      });
+      if (row) {
+        const frames = await readCommentImages(bilibiliCommentPictures(row), limit, 'https://www.bilibili.com/', signal, this.fetcher);
+        if (frames.length) return frames;
+        throw new PlatformError('B 站未交付这条评论可读取的配图。');
+      }
+      if ((page.replies?.length ?? 0) < 20) break;
+    }
+    throw new PlatformError('B 站当前页面没有显示指定楼层。');
   }
   async notifications(
     lane: 'reply' | 'at',
@@ -567,7 +597,7 @@ export class BilibiliPlatform implements SocialPlatform {
     // A detail endpoint alone can expose comments still under review. Require guest list membership.
     const guest = new BilibiliPlatform(() => '', this.fetcher);
     try {
-      const d =
+      let d =
         t.root === '0'
           ? await guest.wbi(
               '/x/v2/reply/wbi/main',
@@ -585,7 +615,11 @@ export class BilibiliPlatform implements SocialPlatform {
               { oid: t.oid, type: t.type, root: t.root, pn: 1, ps: 20 },
               checkSignal,
             );
-      const r = find(d);
+      let r = find(d);
+      for (let pn = 2; !r && t.root !== '0' && pn <= 4 && (pn - 1) * 20 < Number(d.page?.count); pn++) {
+        d = await guest.request('/x/v2/reply/reply', { oid: t.oid, type: t.type, root: t.root, pn, ps: 20 }, checkSignal);
+        r = find(d);
+      }
       if (r && r.state !== 17)
         return report(
           'public',

@@ -40,7 +40,7 @@ function setup(teacher: PracticeTeacher) {
   };
   return { cfg, ctx, invoke, tool, invite, events, range, world };
 }
-it('keeps the staged public-post adapters inaccessible with older enabled settings', async () => {
+it('requires explicit platform opt-in even when legacy public-post settings were enabled', async () => {
   const teacher: PracticeTeacher = {
     openLogin: async () => {}, close: async () => {}, verifyConversation: async (url) => url,
     practice: async () => {},
@@ -48,11 +48,11 @@ it('keeps the staged public-post adapters inaccessible with older enabled settin
   const { cfg, invoke, tool, world } = setup(teacher);
   Object.assign(cfg.experiments!, { tieba: true, xiaohongshu: true });
   const expression = world.tools().find(entry => entry.name === 'socialmedia_expression')!;
-  expect(JSON.stringify(expression.parameters)).not.toMatch(/tieba|xiaohongshu|publicSearch/);
+  expect(JSON.stringify(expression.parameters)).toMatch(/publicSearch/);
   for (const platform of ['tieba', 'xiaohongshu']) {
     await expect(tool({ action: 'publicSearch', platform, query: '试读' })).resolves.toMatchObject({ failed: true });
-    await expect(invoke('settings', 'expressionPublicLogin', [platform])).rejects.toThrow('暂未开放');
-    await expect(invoke('settings', 'expressionReadPost', [platform])).rejects.toThrow('暂未开放');
+    await expect(invoke('settings', 'expressionPublicLogin', [platform])).rejects.toThrow('公开阅读已关闭');
+    await expect(invoke('settings', 'expressionReadPost', [platform])).rejects.toThrow('公开阅读已关闭');
   }
 });
 it('uses an exact public excerpt, submits only that excerpt, and retrieves only approved advice after reopening', async () => {
@@ -89,7 +89,7 @@ it('uses an exact public excerpt, submits only that excerpt, and retrieves only 
   expect(row).toMatchObject({ status: 'review', feedback: expect.arrayContaining([expect.stringContaining('新题')]) });
   expect(sent).toHaveLength(2);
   expect(sent[0]).toContain('停了一秒才转身');
-  expect(sent.every(message => message.startsWith('我是小K，一个在练中文口语和聊天语感的 AI。'))).toBe(true);
+  expect(sent.every(message => message.startsWith('我是一个在练中文口语和聊天语感的 AI。'))).toBe(true);
   expect(sent[0]).not.toMatch(/私人备忘|bilibili\.com|公开作者/);
   await expect(invoke('settings', 'expressionAdopt', [row.id, true])).rejects.toThrow('等小K完成');
   await tool({ action: 'reflect', id: row.id, choice: '选具体动作，保留原先的惊讶', lesson: '具体动作比空泛称赞更自然', newQuestion: '积木视频怎么接话', newAnswer: '摆到最后那块才发现颜色能拼成一条线。' });
@@ -247,6 +247,30 @@ it('uses existing roaming counts while diversifying replies and recognizing a cr
   expect(() => roaming.search(b.id, '相邻主题')).toThrow('机会已用完');
 });
 
+it('archives reviewed conversations, preserves searchable lessons after reopening and frees a full log', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'socialmedia-expression-'));
+  directories.push(dir);
+  const file = join(dir, 'expression.json');
+  const log = new ExpressionLog(file);
+  const row = log.begin('lesson');
+  log.update({ ...row, status: 'review', reflection: { lesson: '具体', choice: '保留', newAnswer: '台灯', newQuestion: '新题' } });
+  for (let i = 1; i < 300; i++) log.begin('pending');
+  expect(() => log.begin('full')).toThrow('300');
+  expect(log.archiveReviewed()).toBe(0);
+  log.assess(row.id, 'keep', '可用');
+  expect(log.archiveReviewed()).toBe(1);
+  expect(log.archiveReviewed()).toBe(0);
+  const reopened = new ExpressionLog(file);
+  expect(reopened.practicePage(1, true).practices[0].original).toBe('lesson');
+  expect(reopened.handbook('台灯')[0].id).toBe(row.id);
+  reopened.setAccountNotice('Gemini 要求人工验证');
+  expect(new ExpressionLog(file).accountNotice).toBe('Gemini 要求人工验证');
+  reopened.setAccountNotice(undefined);
+  expect(new ExpressionLog(file).accountNotice).toBeUndefined();
+  reopened.begin('new');
+  expect(reopened.practicePage(1).activeTotal).toBe(300);
+});
+
 it('pages all saved practices newest first and clamps stale page numbers', () => {
   const dir = mkdtempSync(join(tmpdir(), 'socialmedia-expression-'));
   directories.push(dir);
@@ -260,4 +284,34 @@ it('pages all saved practices newest first and clamps stale page numbers', () =>
     practiceTotal: 34, practicePage: 12, practices: [expect.objectContaining({ original: 'topic 1' })],
   });
   expect(log.practicePage(-1).practicePage).toBe(1);
+});
+
+it('honors corpus weight and stops returning retained samples from a disabled platform', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'socialmedia-corpus-weight-'));
+  directories.push(dir);
+  const log = new ExpressionLog(join(dir, 'expression.json'));
+  log.saveSample({ quote: '要点', topic: '讨论', platform: 'tieba', url: 'https://tieba.baidu.com/p/1', note: '先讲理由' });
+  log.saveSample({ quote: '具体', topic: '讨论', platform: 'bilibili', url: 'https://www.bilibili.com/video/av2', note: '从细节开始' });
+  expect(log.references(id => id === 'tieba' ? 3 : 1).map(row => row.platform)).toEqual(['tieba', 'bilibili']);
+  expect(log.references(id => id === 'tieba' ? 0 : 1).map(row => row.platform)).toEqual(['bilibili']);
+  expect(log.samples()).toHaveLength(2);
+});
+
+it('applies only operator-approved scene advice to new QQ messages, including after reopening or archive; revocation takes effect immediately',async()=>{
+ const {ctx,cfg,world,invoke}=setup({} as PracticeTeacher);
+ cfg.experiments!.practice=true;
+ const log=new ExpressionLog(join(ctx.dataDir,'socialmedia','expression.json'));
+ const practice=log.begin('练习题：回应夸奖');
+ log.update({...practice,status:'review',reflection:{lesson:'接住对方的谢意。',choice:'收下',newQuestion:'训练题',newAnswer:'训练答案'}});
+ log.assess(practice.id,'keep','已评估');
+ expect(world.chatExpressionCue('幸好有你！')).toBeNull();
+ await invoke('settings','expressionChatUse',[practice.id,'praise','接下对方的谢意，用自己的口吻回应。']);
+ await invoke('settings','expressionArchiveReviewed',[]);
+ const restarted=new SocialMediaWorld(ctx);
+ expect(restarted.chatExpressionCue('你可真靠谱！')).toContain('接下对方的谢意');
+ expect(restarted.chatExpressionCue('你可真靠谱！')).not.toContain('训练答案');
+ expect(restarted.chatExpressionCue('几点了')).toBeNull();
+ expect(restarted.chatExpressionCue('她说你可真靠谱')).toBeNull();
+ await restarted.webUi().invoke!('settings','expressionChatUse',[practice.id,null]);
+ expect(restarted.chatExpressionCue('幸好有你')).toBeNull();
 });

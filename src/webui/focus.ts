@@ -7,7 +7,7 @@ const el = (tag: string, text?: string, cls?: string) => {
   if (cls) n.className = cls;
   return n;
 };
-export function focusStatus(state?: FocusSnapshot, platformEnabled = true) {
+export function focusStatus(state?: FocusSnapshot, platformEnabled = true, ownerCount?: number | null) {
   const count = state?.works?.length ?? 0;
   let label = '尚未设置特别关注',
     tone = 'quiet';
@@ -33,13 +33,19 @@ export function focusStatus(state?: FocusSnapshot, platformEnabled = true) {
   }
   const detail = [
     state?.binding ? '关注 ' + state.binding.name : '',
+    state?.binding && platformEnabled && state.enabled && ownerCount != null
+      ? '主人评论区今日发言 ' + ownerCount + ' 条 · 独立计数'
+      : '',
     !platformEnabled || !state?.enabled
       ? '当前未启用检查；填写的账号与已发现作品会保留。'
       : state?.autoReplyNewComments
         ? state.replyExistingComments
           ? '已开启补看：在已读取的主人作品范围内，也考虑已有未回复评论；正常评论逐条处理，已有发送位置不重复发。'
-          : '仅检查已发现作品的新评论；首次扫描不补旧评论，正常交流进入待回应队列，不计普通日配额，保留间隔、防重及安全判断。'
+          : '仅检查已发现作品的新评论；首次扫描不补旧评论，正常交流进入待回应队列。'
         : '可开启新评论自动回应；未开启时由Bot按兴趣选择参与。',
+    platformEnabled && state?.enabled
+      ? '已核实的主人作品评论区，读楼和发言独立于普通活跃度；画面按当前画面设置。'
+      : '',
     state?.check?.error
       ? '本次原因：' + state.check.error + ' 这不代表没有新评论；稍后再检查。'
       : '',
@@ -65,13 +71,13 @@ export function focusView(
   let digest = '';
   return {
     element: section,
-    render(state?: FocusSnapshot, platformEnabled = true) {
+    render(state?: FocusSnapshot, platformEnabled = true, ownerCount?: number | null) {
       section.hidden = !state || (!state.enabled && !state.input);
       if (!state) return;
-      const next = JSON.stringify([state, platformEnabled]);
+      const next = JSON.stringify([state, platformEnabled, ownerCount]);
       if (next === digest) return;
       digest = next;
-      const status = focusStatus(state, platformEnabled);
+      const status = focusStatus(state, platformEnabled, ownerCount);
       summary.textContent = label + ' · ' + status.label;
       summary.dataset.state = status.tone;
       body.replaceChildren();
@@ -81,7 +87,7 @@ export function focusView(
           el(
             'p',
             state.input
-              ? label.startsWith('抖音') || label.startsWith('快手')
+              ? label.startsWith('抖音')
                 ? '请填写准确的平台账号或完整用户主页，核实后固定身份。'
                 : '昵称将按最早主动联系记录识别；也可以在配置中填写UID或主页链接立即确定。'
               : '请先在配置中填写主人账号。',

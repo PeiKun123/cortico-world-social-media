@@ -43,6 +43,17 @@ describe('Douyin isolated browser adapter', () => {
       mapDouyinComment({ ...raw.comments[0], reply_to_reply_id: '99' }, id, '88').target,
     ).toMatchObject({ root: '88', parent: '7697799441646256820' });
   });
+  it('keeps Douyin image-only comments and counts safe picture attachments', () => {
+    const row = mapDouyinComment({
+      cid: '123', text: '', user: { uid: '33', nickname: '读者' },
+      image_list: [
+        { origin_url: { url_list: ['https://p3-sign.douyinpic.com/comment.webp'] } },
+        { origin_url: { url_list: ['https://p3-sign.douyinpic.com.invalid/a.webp'] } },
+      ],
+    }, id);
+    expect(row).toMatchObject({ id: '123', text: '', imageCount: 1 });
+    expect(row).not.toHaveProperty('imageUrls');
+  });
   it('maps public video facts without claiming the video was watched', () => {
     expect(
       mapDouyinVideo({

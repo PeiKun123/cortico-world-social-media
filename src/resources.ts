@@ -15,10 +15,73 @@ import { join, resolve } from 'node:path';
 import { MAX_VIDEO_FRAMES, RESOURCE_DEFAULTS, type ResourceConfig } from './resource-policy.ts';
 export { RESOURCE_DEFAULTS, type ResourceConfig } from './resource-policy.ts';
 export type SampleFrame = { atSec: number; bytes: Uint8Array };
+export class VisualBudgetError extends Error {}
+export function commentImageMime(bytes: Uint8Array) {
+  if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'image/jpeg';
+  const head = Buffer.from(bytes.subarray(0, 12));
+  if (head.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex'))) return 'image/png';
+  if (head.toString('ascii', 0, 4) === 'RIFF' && head.toString('ascii', 8, 12) === 'WEBP') return 'image/webp';
+  if (/^GIF8[79]a$/.test(head.toString('ascii', 0, 6))) return 'image/gif';
+}
+
+export function officialCommentImage(value: unknown, hosts: RegExp) {
+  if (typeof value !== 'string' || value.length > 4000) return;
+  const url = URL.parse(value.startsWith('//') ? 'https:' + value : value);
+  if (url?.protocol === 'https:' && !url.port && !url.username && !url.password && hosts.test(url.hostname))
+    return url.href;
+}
+
+export async function readCommentImages(
+  urls: readonly string[], limit: number, referer: string, signal?: AbortSignal, fetcher = fetch,
+): Promise<Array<{ atSec: number; bytes: Buffer }>> {
+  const results: Array<{ atSec: number; bytes: Buffer }> = [];
+  const cap = 4 * 1024 * 1024;
+  const requests = urls.slice(0, Math.min(MAX_VIDEO_FRAMES, limit));
+  for (let index = 0; index < requests.length; index += 3) {
+    signal?.throwIfAborted();
+    const batch = await Promise.all(requests.slice(index, index + 3).map(async (url, offset) => {
+      try {
+        const timeout = AbortSignal.timeout(8000);
+        const response = await fetcher(url, {
+          redirect: 'error', credentials: 'omit', headers: { Referer: referer },
+          signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
+        });
+        const type = response.headers.get('content-type')?.split(';')[0].trim().toLowerCase();
+        if (!response.ok || !type || !/^image\/(?:jpeg|png|webp|gif)$/.test(type) ||
+            Number(response.headers.get('content-length') || 0) > cap) {
+          await response.body?.cancel();
+          return;
+        }
+        const reader = response.body?.getReader();
+        if (!reader) return;
+        const parts: Uint8Array[] = [];
+        let length = 0;
+        try {
+          for (;;) {
+            const next = await reader.read();
+            if (next.done) break;
+            length += next.value.length;
+            if (length > cap) return;
+            parts.push(next.value);
+          }
+        } finally {
+          await reader.cancel().catch(() => {});
+        }
+        const bytes = Buffer.concat(parts, length);
+        if (commentImageMime(bytes) === type) return { atSec: index + offset + 1, bytes };
+      } catch {
+        signal?.throwIfAborted();
+      }
+    }));
+    results.push(...batch.filter(frame => frame !== undefined));
+  }
+  return results;
+}
 type Ledger = {
   kind: 'socialmedia-resources-v1';
   day: string;
   todayCalls: number;
+  byPlatform?: Record<string, number>;
   publishedBytes: number;
 };
 type CacheEntry = {
@@ -109,6 +172,7 @@ export class MediaResources {
     if (this.ledger.day !== this.day()) {
       this.ledger.day = this.day();
       this.ledger.todayCalls = 0;
+      this.ledger.byPlatform = {};
       this.save();
     }
   }
@@ -176,6 +240,7 @@ export class MediaResources {
     const entries = this.entries();
     return {
       todayCalls: this.ledger.todayCalls,
+      byPlatform: { ...this.ledger.byPlatform },
       maxDailyVisualCalls: this.cfg().maxDailyVisualCalls,
       unlimitedDailyVisualCalls: this.cfg().unlimitedDailyVisualCalls,
       publishedBytes: this.ledger.publishedBytes,
@@ -225,20 +290,31 @@ export class MediaResources {
         rmSync(dir, { recursive: true });
     }
   }
-  async observe(key: string, capture: () => Promise<SampleFrame[]>, cacheIf = (_frames: SampleFrame[]) => true) {
+  async observe(
+    key: string,
+    capture: () => Promise<SampleFrame[]>,
+    cacheIf = (_frames: SampleFrame[]) => true,
+    platform?: { id: string; daily?: 'inherit' | 'bounded' | 'unlimited' },
+  ) {
     return this.serial(async () => {
       this.sweep();
       this.resetDay();
       const cfg = this.cfg();
       if (cfg.maxDailyVisualCalls === 0)
-        throw Error('画面观察已关闭；可继续读文字和评论。');
-      if (!cfg.unlimitedDailyVisualCalls && this.ledger.todayCalls >= cfg.maxDailyVisualCalls)
-        throw Error('今日画面观察次数已用完；可继续读文字和评论。');
+        throw new VisualBudgetError('画面观察已关闭；可继续读文字和评论。');
+      const byPlatform = (this.ledger.byPlatform ??= {});
+      const platformCalls = platform ? byPlatform[platform.id] ?? 0 : 0;
+      const mode = platform?.daily ?? 'inherit';
+      const calls = platform ? platformCalls : this.ledger.todayCalls;
+      const unlimited = mode === 'inherit' ? cfg.unlimitedDailyVisualCalls : mode === 'unlimited';
+      if (!unlimited && calls >= cfg.maxDailyVisualCalls)
+        throw new VisualBudgetError('今日画面观察次数已用完；可继续读文字和评论。');
       const path = join(
         this.dir,
         'frame-' + createHash('sha256').update(key).digest('hex') + '.json',
       );
       this.ledger.todayCalls++;
+      if (platform) byPlatform[platform.id] = platformCalls + 1;
       this.save();
       if (existsSync(path)) {
         this.assertFile(path);
@@ -260,12 +336,12 @@ export class MediaResources {
         }
       }
       if (this.ledger.publishedBytes >= cfg.maxPublishedMediaMB * 1048576)
-        throw Error('累计图片交付预算已用完；宿主历史附件须由Cortico管理，可继续文字交流。');
+        throw new VisualBudgetError('累计图片交付预算已用完；宿主历史附件须由Cortico管理，可继续文字交流。');
       const frames = await capture();
       this.validate(frames);
       const bytes = frames.reduce((n, f) => n + f.bytes.length, 0);
       if (this.ledger.publishedBytes + bytes > cfg.maxPublishedMediaMB * 1048576)
-        throw Error('本次图片超过累计交付预算，未附加图片。');
+        throw new VisualBudgetError('本次图片超过累计交付预算，未附加图片。');
       const capturedAt = Date.now(),
         entry: CacheEntry = {
           kind: 'socialmedia-frames-v1',

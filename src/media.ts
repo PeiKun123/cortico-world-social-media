@@ -102,6 +102,33 @@ export async function composeStoryboard(
   return { cells, bytes: await readFile(output) };
 }
 
+export async function fitCommentPhotos(
+  frames: Array<{ atSec: number; bytes: Buffer }>, maxBytes: number, ffmpegFile: string, dir: string, signal?: AbortSignal,
+) {
+  const result = [];
+  for (const frame of frames) {
+    signal?.throwIfAborted();
+    if (frame.bytes.length <= maxBytes) {
+      result.push(frame);
+      continue;
+    }
+    if (!ffmpegFile.trim()) continue;
+    const input = join(dir, 'photo-' + frame.atSec);
+    const output = input + '.jpg';
+    try {
+      await writeFile(input, frame.bytes);
+      await runFfmpeg(ffmpegFile, ['-y', '-v', 'error', '-protocol_whitelist', 'file,pipe',
+        '-i', input, '-frames:v', '1', '-vf', 'scale=960:960:force_original_aspect_ratio=decrease',
+        '-q:v', '5', output], signal);
+      const bytes = await readFile(output);
+      if (bytes.length && bytes.length <= maxBytes) result.push({ atSec: frame.atSec, bytes });
+    } catch {
+      signal?.throwIfAborted();
+    }
+  }
+  return result;
+}
+
 export function runFfmpeg(file: string, args: string[], signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (!file.trim()) {
@@ -112,7 +139,11 @@ export function runFfmpeg(file: string, args: string[], signal?: AbortSignal): P
       reject(new Error('操作已取消'));
       return;
     }
-    const child = spawn(file, args, { stdio: 'ignore', windowsHide: true, shell: false });
+    const child = spawn(file, args, { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true, shell: false });
+    let diagnostic = '';
+    child.stderr.setEncoding('utf8').on('data', (chunk: string) => {
+      diagnostic = (diagnostic + chunk).slice(-4096);
+    });
     let error: Error | undefined;
     const cancel = () => {
       error = new Error('视频采样已取消或超时');
@@ -127,7 +158,13 @@ export function runFfmpeg(file: string, args: string[], signal?: AbortSignal): P
       clearTimeout(timer);
       signal?.removeEventListener('abort', cancel);
       if (error) reject(error);
-      else if (code !== 0) reject(new Error('FFmpeg 未能解码该视频。'));
+      else if (code !== 0) {
+        const reason = /Decoder .*not found|Unknown decoder/i.test(diagnostic) ? '当前 FFmpeg 缺少解码器'
+          : /invalid data|moov atom not found/i.test(diagnostic) ? '媒体容器无效或数据不完整'
+          : /Permission denied|No space left/i.test(diagnostic) ? '本机临时目录无法读写或空间不足'
+          : '媒体解码或图片处理失败';
+        reject(new Error('FFmpeg 未能完成处理：' + reason + '（退出码 ' + code + '）。'));
+      }
       else resolve();
     });
   });

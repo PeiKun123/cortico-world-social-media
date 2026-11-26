@@ -56,12 +56,12 @@ describe.skipIf(!findBrowserExecutable())('timeline in a real browser', () => {
       if (path === '/webui.js')
         return route.fulfill({
           contentType: 'application/javascript',
-          body: readFileSync(new URL('../dist/webui-surf-0612-release.js', import.meta.url), 'utf8'),
+          body: readFileSync(new URL('../dist/webui-surf-idle-clock.js', import.meta.url), 'utf8'),
         });
       if (path === '/style.css')
         return route.fulfill({
           contentType: 'text/css',
-          body: readFileSync(new URL('../dist/webui-surf-0612-release.css', import.meta.url), 'utf8'),
+          body: readFileSync(new URL('../dist/webui-surf-idle-clock.css', import.meta.url), 'utf8'),
         });
       return route.fulfill({
         contentType: 'text/html',
@@ -78,6 +78,29 @@ describe.skipIf(!findBrowserExecutable())('timeline in a real browser', () => {
     else await page.locator('.sm-video').first().waitFor();
     return page;
   }
+  it.each([false, true])('keeps the current idle time visible in the title on a narrow screen (settings=%s)', async settings => {
+    const page = await fixture(390, settings);
+    try {
+      await page.evaluate(() => {
+        const w = window as any;
+        w.testState.roaming = { enabled: true, idle: true, idleSeconds: 3661, recent: [], usedToday: 0 };
+        w.refreshers.forEach((fn: () => void) => fn());
+      });
+      const clock = page.locator('.sm-tv-heading [role=timer]');
+      await clock.filter({ hasText: '01:01:01' }).waitFor();
+      if (!settings) {
+        await page.getByRole('button', { name: '待回应', exact: true }).click();
+        expect(await clock.isVisible()).toBe(true);
+      }
+      expect((await clock.boundingBox())!.x).toBeGreaterThan(100);
+      await page.evaluate(() => {
+        const w = window as any;
+        w.testState.roaming.idle = false;
+        w.refreshers.forEach((fn: () => void) => fn());
+      });
+      await clock.filter({ hasText: '忙碌中' }).waitFor();
+    } finally { await page.close(); }
+  });
   it('shows the renamed settings and a visible experimental entry below platform settings', async () => {
     const page = await fixture(1050, true);
     try {
@@ -86,21 +109,25 @@ describe.skipIf(!findBrowserExecutable())('timeline in a real browser', () => {
       const entry = experiments.getByText('实验功能', { exact: true });
       expect(await title.isVisible()).toBe(true);
       expect((await entry.boundingBox())!.y).toBeGreaterThan((await page.locator('.sm-settings').boundingBox())!.y);
-      await page.evaluate(() => {
-        const w = window as any;
-        Object.assign(w.testState.config.experiments, { tieba: true, xiaohongshu: true });
-      });
+      for (const label of ['小红书', '百度贴吧']) {
+        const platformTitle = label === '百度贴吧' ? label + '（实验）' : label;
+        await page.getByRole('tab', { name: platformTitle, exact: true }).click();
+        const panel = page.getByRole('tabpanel', { name: platformTitle });
+        expect(await panel.getByRole('checkbox', { name: '启用' + platformTitle }).isChecked()).toBe(false);
+        expect(await panel.getByRole('button', { name: '打开' + label + '专用登录窗口' }).isVisible()).toBe(true);
+        await panel.getByText('本站画面设置', { exact: true }).click();
+        expect(await panel.getByRole('combobox', { name: '画面档位' }).locator('option').count()).toBe(3);
+      }
+      expect(await page.getByRole('tab').count()).toBe(4);
       await entry.click();
       await experiments.getByText('表达素材 · 0', { exact: true }).waitFor();
-      expect(await page.getByText(/百度贴吧|小红书/).count()).toBe(0);
-      expect(await page.getByRole('tab', { name: '抖音（实验）', exact: true }).isVisible()).toBe(true);
-      expect(await page.getByRole('tab', { name: '快手（实验）', exact: true }).isVisible()).toBe(true);
-      for (const label of ['语料学习', '人格化练习']) {
+      for (const label of ['人格化练习']) {
         const toggle = experiments.getByRole('checkbox', { name: label, exact: true });
         expect(await toggle.isVisible()).toBe(true);
         expect(await toggle.isChecked()).toBe(false);
       }
       expect(await experiments.getByText('开启「开始训练」后消耗较高，建议按需开启。').isVisible()).toBe(true);
+      expect(await experiments.getByText(/账号风险提示/).isVisible()).toBe(true);
       expect(await experiments.locator('textarea').count()).toBe(0);
       expect(await entry.evaluate(element => getComputedStyle(element).color)).toBe('rgb(244, 173, 114)');
       expect(await page.getByText('刷会儿小电视', { exact: true }).count()).toBe(0);
@@ -333,7 +360,7 @@ describe.skipIf(!findBrowserExecutable())('timeline in a real browser', () => {
           target: { oid: '10000', type: 1, root: '0', parent: '0' },
           createdAt: new Date().toISOString(),
         });
-        w.refreshers[1]();
+        w.refreshers.forEach((fn: () => void) => fn());
       });
       await page.locator('[data-group-key="bilibili:1:10000"]').waitFor({ state: 'attached' });
       const after = await page
@@ -415,7 +442,7 @@ describe.skipIf(!findBrowserExecutable())('timeline in a real browser', () => {
       const frames = page.getByRole('spinbutton', { name: '每批最多看几张图文' });
       expect(await count.inputValue()).toBe('20');
       expect(await frames.inputValue()).toBe('2');
-      const unlimited = page.getByRole('checkbox', { name: '取消每日次数上限' });
+      const unlimited = page.getByRole('checkbox', { name: '取消每日画面次数上限' });
       await unlimited.check();
       await page.getByRole('button', { name: /低 · 扫一眼/ }).click();
       expect(await unlimited.isChecked()).toBe(true);
@@ -426,7 +453,7 @@ describe.skipIf(!findBrowserExecutable())('timeline in a real browser', () => {
       await page.getByRole('button', { name: /40 次 · 经常看/ }).click();
       await page.getByRole('button', { name: /6 张 · 多看几张/ }).click();
       expect(await page.getByRole('spinbutton', { name: '每次最多抽几帧视频' }).inputValue()).toBe('12');
-      await page.getByRole('checkbox', { name: '取消每日次数上限' }).check();
+      await page.getByRole('checkbox', { name: '取消每日画面次数上限' }).check();
       expect(await count.isDisabled()).toBe(true);
       expect(await frames.isEnabled()).toBe(true);
       await page.getByRole('button', { name: '关闭画面', exact: true }).click();
@@ -462,19 +489,23 @@ describe.skipIf(!findBrowserExecutable())('timeline in a real browser', () => {
           color: getComputedStyle(n).getPropertyValue('--sm-accent').trim(),
         })),
       );
-      expect(colors.map((n) => n.id)).toEqual(['bilibili', 'douyin', 'kuaishou']);
-      expect(new Set(colors.map((n) => n.color)).size).toBe(3);
-      await page.getByRole('tab', { name: '快手（实验）', exact: true }).click();
-      const focus = page.locator('.sm-platform-card[data-platform="kuaishou"] .sm-platform-focus');
+      expect(colors.map((n) => n.id)).toEqual(['bilibili', 'douyin', 'xiaohongshu', 'tieba']);
+      expect(new Set(colors.map((n) => n.color)).size).toBe(4);
+      const platformTabs = page.getByRole('tab');
+      await platformTabs.filter({ has: page.locator('.sm-experimental') })
+        .and(page.getByRole('tab', { name: /贴吧（实验）/ })).waitFor();
+      expect(await platformTabs.filter({ has: page.locator('.sm-experimental') }).count()).toBe(1);
+      await page.getByRole('tab', { name: '小红书', exact: true }).click();
+      const focus = page.locator('.sm-platform-card[data-platform="xiaohongshu"] .sm-platform-focus');
       expect(await focus.getAttribute('open')).toBeNull();
       await focus.locator(':scope > summary').click();
-      const input = focus.locator('[aria-label="快手主人主页或快手号"]');
+      const input = focus.locator('[aria-label="小红书主人个人主页完整链接"]');
       await input.fill('custom-owner-123');
       await page.evaluate(() => {
-        (window as any).refreshers[1]();
+        (window as any).refreshers.forEach((fn: () => void) => fn());
       });
       await page.getByRole('tab', { name: '哔哩哔哩', exact: true }).click();
-      await page.getByRole('tab', { name: '快手（实验）', exact: true }).click();
+      await page.getByRole('tab', { name: '小红书', exact: true }).click();
       expect(await input.inputValue()).toBe('custom-owner-123');
       expect(await focus.getAttribute('open')).not.toBeNull();
       expect(
@@ -492,7 +523,8 @@ describe.skipIf(!findBrowserExecutable())('timeline in a real browser', () => {
         const w = window as any;
         for (const [platform, type] of [
           ['douyin', 2],
-          ['kuaishou', 3],
+          ['xiaohongshu', 5],
+          ['tieba', 4],
         ])
           w.testState.outbox.push({
             ...w.testState.outbox[0],
@@ -500,10 +532,10 @@ describe.skipIf(!findBrowserExecutable())('timeline in a real browser', () => {
             platform,
             target: { oid: platform + 'video123', type, root: '0', parent: '0' },
           });
-        w.refreshers[1]();
+        w.refreshers.forEach((fn: () => void) => fn());
       });
-      await page.locator('.sm-video[data-platform="kuaishou"]').waitFor();
-      for (const id of ['bilibili', 'douyin', 'kuaishou']) {
+      await page.locator('.sm-video[data-platform="xiaohongshu"]').waitFor();
+      for (const id of ['bilibili', 'douyin', 'xiaohongshu', 'tieba']) {
         const group = page.locator('.sm-video[data-platform="' + id + '"]').first();
         await group.locator('summary').first().click();
         await group.locator('.sm-outgoing').first().waitFor();
@@ -521,7 +553,7 @@ describe.skipIf(!findBrowserExecutable())('timeline in a real browser', () => {
   it('keeps the adjustable Douyin loading wait inside the collapsed connection options', async () => {
     const page = await fixture(1100, true);
     try {
-      await page.getByRole('tab', { name: '抖音（实验）', exact: true }).click();
+      await page.getByRole('tab', { name: '抖音', exact: true }).click();
       const options = page.locator('.sm-platform-card[data-platform=douyin] .sm-platform-advanced');
       expect(await options.evaluate((e) => (e as HTMLDetailsElement).open)).toBe(false);
       const field = page.getByRole('spinbutton', { name: '网页加载等待上限（秒）', exact: true });
@@ -531,8 +563,13 @@ describe.skipIf(!findBrowserExecutable())('timeline in a real browser', () => {
       expect(await field.getAttribute('min')).toBe('15');
       expect(await field.getAttribute('max')).toBe('120');
       await field.fill('90');
+      await page.getByRole('tab', { name: '哔哩哔哩', exact: true }).click();
+      await page.getByRole('tab', { name: '抖音', exact: true }).click();
+      expect(await field.inputValue()).toBe('90');
       await page.getByRole('button', { name: '保存抖音设置', exact: true }).click();
-      expect(await page.evaluate(() => (window as any).calls.includes('settings'))).toBe(true);
+      expect(await page.evaluate(() => (window as any).savedSettings)).toEqual({
+        'worlds.socialmedia.douyinBrowser.pageWaitSeconds': 90,
+      });
     } finally {
       await page.close();
     }
@@ -556,7 +593,7 @@ describe.skipIf(!findBrowserExecutable())('timeline in a real browser', () => {
         };
         w.refreshers.forEach((fn: () => void) => fn());
       });
-      await page.getByRole('tab', { name: '抖音（实验）', exact: true }).click();
+      await page.getByRole('tab', { name: '抖音', exact: true }).click();
       const box = page.locator('.sm-platform-card[data-platform=douyin] .sm-browser-failure');
       await box.waitFor();
       expect(await box.evaluate((n) => (n as HTMLDetailsElement).open)).toBe(false);
@@ -602,7 +639,7 @@ describe.skipIf(!findBrowserExecutable())('timeline in a real browser', () => {
         };
         w.refreshers.forEach((fn: () => void) => fn());
       });
-      await page.getByRole('tab', { name: '抖音（实验）', exact: true }).click();
+      await page.getByRole('tab', { name: '抖音', exact: true }).click();
       const panel = page.locator('.sm-platform-card[data-platform=douyin]');
       expect(await panel.locator('.sm-verification').innerText()).toContain('已登录');
       await panel.getByRole('button', { name: '处理人工验证', exact: true }).click();

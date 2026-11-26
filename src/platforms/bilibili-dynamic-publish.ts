@@ -142,18 +142,39 @@ export async function prepareDynamicPage(page: Page, draft: Pick<DynamicPost, 't
     )
       throw new PlatformError('官网@标记未核实到准确UID，尚未提交。', 'rejected');
     await editor.press('End');
-    await page.keyboard.insertText(draft.text);
   } else {
     await editor.click();
-    await page.keyboard.insertText(draft.text);
+  }
+  const lines = draft.text.split('\n');
+  for (const [index, line] of lines.entries()) {
+    if (index) await editor.press('Enter');
+    if (line) await page.keyboard.insertText(line);
   }
   const expected = draft.mention ? '@' + draft.mention.name + ' ' + draft.text : draft.text;
   const actual = (await editor.innerText())
     .replace(/[\u200b\ufeff]/g, '')
     .replace(/\u00a0/g, ' ')
     .trim();
-  if (actual !== expected)
-    throw new PlatformError('官网输入框正文或@标记发生变化，尚未提交。', 'rejected');
+  const joinedMention = draft.mention && '@' + draft.mention.name + draft.text;
+  if (actual !== expected && actual !== joinedMention) {
+    // Chromium innerText adds an extra newline for a blank contenteditable div.
+    const lines = await editor.evaluate(el => {
+      let result = '';
+      for (const [index, child] of Array.from(el.childNodes).entries()) {
+        if (child instanceof HTMLDivElement) {
+          if (index > 0) result += '\n';
+          if (!(child.childNodes.length === 1 && child.firstChild instanceof HTMLBRElement))
+            result += child.innerText;
+        } else if (child instanceof HTMLBRElement) result += '\n';
+        else if (child.nodeType === Node.TEXT_NODE) result += child.textContent;
+        else if (child instanceof HTMLElement) result += child.innerText;
+        else return null;
+      }
+      return result.replace(/[\u200b\ufeff]/g, '').replace(/\u00a0/g, ' ').trim();
+    });
+    if (lines === null || (lines !== expected && lines !== joinedMention))
+      throw new PlatformError('官网输入框正文或@标记发生变化，尚未提交。', 'rejected');
+  }
   await page
     .locator('.bili-dyn-publishing__action.launcher:not(.disabled)')
     .waitFor({ state: 'visible', timeout: 5000 });

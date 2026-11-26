@@ -1,3 +1,4 @@
+import { ROAMING_PLATFORMS } from './config.ts';
 import type {
   CommentTarget,
   InboxItem,
@@ -35,7 +36,7 @@ export function safeBiliLink(raw: string | undefined) {
       (['www.bilibili.com', 'bilibili.com', 'm.bilibili.com', 't.bilibili.com'].includes(
         u.hostname,
       ) ||
-        (['https://www.douyin.com', 'https://www.kuaishou.com'].includes(u.origin) &&
+        (['https://www.douyin.com', 'https://tieba.baidu.com', 'https://www.xiaohongshu.com'].includes(u.origin) &&
           !u.username &&
           !u.password))
       ? u.href
@@ -45,8 +46,8 @@ export function safeBiliLink(raw: string | undefined) {
   }
 }
 function videoLink(t: CommentTarget) {
-  if (t.type === 3 && /^[A-Za-z0-9_-]{5,80}$/.test(t.oid))
-    return 'https://www.kuaishou.com/short-video/' + t.oid;
+  if (t.type === 4 && /^[1-9][0-9]{0,21}$/.test(t.oid)) return 'https://tieba.baidu.com/p/' + t.oid;
+  if (t.type === 5 && /^[a-f0-9]{24}$/i.test(t.oid)) return 'https://www.xiaohongshu.com/explore/' + t.oid;
   if (t.type === 2 && /^\d+$/.test(t.oid)) return 'https://www.douyin.com/video/' + t.oid;
   return t.type === 1 && /^\d+$/.test(t.oid)
     ? 'https://www.bilibili.com/video/av' + t.oid + '/'
@@ -70,7 +71,7 @@ function dynamicPage(raw?: string) {
 export function commentLink(t: CommentTarget, receiptId?: string, resourceUrl?: string) {
   const base = videoLink(t) || ([11, 17].includes(t.type) ? dynamicPage(resourceUrl) : undefined);
   if (!base) return;
-  if (t.type === 2 || t.type === 3) return base; // No unverified deep-link parameters for Douyin comments.
+  if ([2, 4, 5].includes(t.type)) return base; // No unverified deep-link parameters for Douyin comments.
   const id = receiptId ?? t.parent;
   if (!/^\d+$/.test(id) || id === '0') return;
   const root = t.root && t.root !== '0' ? t.root : id;
@@ -88,7 +89,10 @@ export function buildInteractions(
   comments: PublicComment[] = [],
 ): InteractionGroup[] {
   const groups = new Map<string, InteractionGroup>();
+  const supported: ReadonlySet<string> = new Set(ROAMING_PLATFORMS);
   const add = (platform: string, e: InteractionEntry, sourceUrl?: string) => {
+    platform ??= 'bilibili';
+    if (!supported.has(platform)) return;
     const key = [platform, e.target.type, e.target.oid].join(':'),
       v = [11, 17].includes(e.target.type)
         ? undefined
@@ -162,8 +166,8 @@ export function buildInteractions(
     const status =
       r.status === 'sent'
         ? r.visibility
-          ? visibility[r.visibility.status]
-          : '公开待核验'
+          ? (r.visibility.status === 'unconfirmed' && r.receiptId ? '已有回执 · 公开待核验' : visibility[r.visibility.status])
+          : (r.receiptId ? '已有回执 · 公开待核验' : '公开待核验')
         : { sending: '发送中', unknown: '发送待核对', rejected: '未发出' }[r.status];
     const quote =
       r.preparation?.parent ??

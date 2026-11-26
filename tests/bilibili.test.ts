@@ -1,3 +1,4 @@
+// Offline fixtures: account 42, cookie values, device IDs and QR keys below are synthetic test inputs.
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -39,6 +40,32 @@ describe('Bilibili protocol boundaries', () => {
     await api.assetJson('https://aisubtitle.hdslb.com/a.json');
     expect(calls[0].headers.has('cookie')).toBe(false);
     await expect(api.assetJson('https://127.0.0.1/a')).rejects.toThrow();
+  });
+  it('reads images only from the exact Bilibili floor without sending cookies to the image CDN', async () => {
+    const requests: Array<{ url: string; headers: Headers; redirect?: string }> = [];
+    const trusted = 'https://i0.hdslb.com/bfs/new_dyn/comment.png';
+    const other = 'https://i0.hdslb.com/bfs/new_dyn/other.png';
+    const png = Buffer.from('89504e470d0a1a0a00000000', 'hex');
+    const api = new BilibiliPlatform(() => 'SESSDATA=private', async (addr, init) => {
+      const url = String(addr); requests.push({ url, headers: new Headers(init?.headers), redirect: init?.redirect });
+      if (url === trusted) return new Response(png, { headers: { 'content-type': 'image/png' } });
+      if (url.includes('/x/v2/reply/reply')) return Response.json({ code: 0, data: {
+        root: { rpid: '30', root: '0', content: { pictures: [{ img_src: other }] } },
+        replies: [{ rpid: '31', root: '30', content: { message: '', pictures: [
+          { img_src: 'https://i0.hdslb.com.invalid/a.png' }, { img_src: trusted },
+        ] } }],
+      } });
+      throw Error('Unexpected destination');
+    });
+    const target = { oid: '99', type: 1, root: '30', parent: '31' };
+    const list = await api.comments(target);
+    expect(list.items[0]).toMatchObject({ target, imageCount: 1 });
+    const frames = await api.commentImages(target, 12);
+    expect(frames.map(frame => frame.atSec)).toEqual([1]);
+    expect(requests.filter(r => r.url === trusted)).toHaveLength(1);
+    expect(requests.find(r => r.url === trusted)?.headers.has('cookie')).toBe(false);
+    expect(requests.find(r => r.url === trusted)?.redirect).toBe('error');
+    expect(requests.some(r => r.url === other || r.url.includes('.invalid'))).toBe(false);
   });
   it('keeps reply root and parent distinct and reports rejected sends', async () => {
     let body = '';
@@ -174,6 +201,17 @@ describe('publication visibility', () => {
     expect(await api.checkVisibility({ ...target, root: '0', parent: '0' }, '567')).toMatchObject({
       status: 'public',
     });
+  });
+  it('finds a guest-visible child beyond the first page without account cookies', async () => {
+    const pages: string[] = [];
+    const api = new BilibiliPlatform(() => 'SESSDATA=test', async (url, init) => {
+      expect(new Headers(init?.headers).has('cookie')).toBe(false);
+      const pn = new URL(String(url)).searchParams.get('pn')!;
+      pages.push(pn);
+      return Response.json({ code: 0, data: { page: { count: 45 }, replies: pn === '3' ? [{ rpid: '567', state: 0 }] : [] } });
+    });
+    expect((await api.checkVisibility(target, '567')).status).toBe('public');
+    expect(pages).toEqual(['1', '2', '3']);
   });
   it('recognizes explicit self-only state and does not confuse a missing page with hidden content', async () => {
     let state = 17;

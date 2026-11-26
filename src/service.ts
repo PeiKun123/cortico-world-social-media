@@ -5,6 +5,8 @@ import { OwnerFocus } from './focus.ts';
 import { Roaming } from './roaming.ts';
 import {
   PlatformError,
+  hasIndependentOwnerComments,
+  isOwnerCommentRecord,
   type Account,
   type CommentTarget,
   type InboxItem,
@@ -81,11 +83,11 @@ export class SocialService {
     if (!this.cfg.platforms[id]?.enabled) throw new Error(`${id} 已关闭`);
     return p;
   }
-  async connect(id: string, signal?: AbortSignal) {
+  async connect(id: string, signal?: AbortSignal, confirm?: (signal?: AbortSignal) => Promise<Account>) {
     const p = this.platform(id);
     const state = this.states.get(id)!;
     try {
-      state.account = await p.account(signal);
+      state.account = await (confirm ? confirm(signal) : p.account(signal));
       state.error = undefined;
       state.retryAtMs = undefined;
       for (const lane of ['reply', 'at']) this.store.feed(`${id}:${state.account.id}:${lane}`);
@@ -105,6 +107,28 @@ export class SocialService {
       s.lastPollAt = undefined;
     }
   }
+  private focusWorkOwner(platform: string, accountId: string, target: CommentTarget) {
+    const focus = this.focusFor(platform);
+    const ownerId = focus.settings.enabled ? focus.binding(accountId)?.ownerId : undefined;
+    if (!ownerId) return;
+    if (platform === 'bilibili' && (target.type === 11 || target.type === 17)) {
+      const match = this.store.dynamics(accountId).some(d =>
+        d.authorId === ownerId && d.target?.type === target.type && d.target.oid === target.oid,
+      );
+      return match ? ownerId : undefined;
+    }
+    const match = this.store.focusWorks().some(w =>
+      (w.platform ?? 'bilibili') === platform &&
+      w.accountId === accountId && w.ownerId === ownerId && w.video.aid === target.oid,
+    );
+    return match ? ownerId : undefined;
+  }
+
+  isOwnerCommentTarget(platform: string, target: CommentTarget, accountId = this.states.get(platform)?.account?.id) {
+    return Boolean(accountId && hasIndependentOwnerComments(platform) &&
+      this.focusWorkOwner(platform, accountId, target));
+  }
+
   private publishingUsage(platform: string, accountId?: string) {
     const today = this.day(new Date().toISOString()),
       cfg = this.cfg.platforms[platform].posting;
@@ -119,18 +143,24 @@ export class SocialService {
               this.day(r.createdAt) === today,
           )
       : [];
-    const ordinary = records.filter((r) => !r.ownerAutoReply);
+    const independent = hasIndependentOwnerComments(platform);
+    const owner = records.filter(isOwnerCommentRecord);
+    const ordinary = records.filter(r => !isOwnerCommentRecord(r));
     return {
       dailyUsed: accountId ? ordinary.length : null,
-      ownerRepliesToday: accountId ? records.length - ordinary.length : null,
-      ownerReplyDailyLimit: null,
-      ownerReplyPerPersonLimit: null,
+      ownerCommentsToday: accountId && independent ? owner.length : null,
+      ownerRepliesToday: accountId
+        ? (independent ? owner.filter(r => r.target.parent !== '0') : records.filter(r => r.ownerAutoReply)).length
+        : null,
+      ownerReplyDailyLimit: independent ? null : cfg.maxDailyComments,
+      ownerReplyPerPersonLimit: independent ? null : MAX_REPLIES_PER_PERSON,
       dailyLimit: cfg.maxDailyComments,
       notificationUsed: accountId
-        ? ordinary.filter((r) => r.inboxId && !r.focusOwnerId).length
+        ? ordinary.filter(r => r.inboxId && !r.focusOwnerId).length
         : null,
       notificationLimit: cfg.maxDailyReplies ?? 80,
       perPersonLimit: MAX_REPLIES_PER_PERSON,
+      ...(platform === 'bilibili' && this.cfg.focus.enabled ? { boundOwnerNotificationPerPersonLimit: this.cfg.focus.outsideReplyLimit ?? MAX_REPLIES_PER_PERSON } : {}),
     };
   }
   connectionStatus() {
@@ -150,7 +180,7 @@ export class SocialService {
         replyPriority: replies.filter((i) => i.platform === s.id).length,
         publishing: this.publishingUsage(s.id, s.account?.id),
       })),
-      plannedPlatforms: ['douyin', 'kuaishou'].filter((id) => !this.adapters.has(id)),
+      plannedPlatforms: ['douyin'].filter((id) => !this.adapters.has(id)),
       pending,
       unknown,
     };
@@ -259,7 +289,9 @@ export class SocialService {
   private notificationEnabled(i: InboxItem, allowRecovery = false) {
     return (
       i.status === 'pending' &&
+      this.adapters.has(i.platform) &&
       this.cfg.platforms[i.platform]?.enabled &&
+      !this.adapters.get(i.platform)?.paused &&
       (i.focusOwnerId
         ? this.focusFor(i.platform).settings.enabled &&
           (!i.ownerAutoReply || this.focusFor(i.platform).settings.autoReplyNewComments)
@@ -278,16 +310,17 @@ export class SocialService {
   }
   private notificationLimit(i: InboxItem) {
     const auto = this.autoReply(i);
+    const ownerId = i.focusOwnerId ?? (
+      hasIndependentOwnerComments(i.platform) ? this.focusWorkOwner(i.platform, i.accountId, i.target) : undefined
+    );
     return (
-      (i.focusOwnerId
-        ? this.focusLimit(i.platform, i.accountId, i.focusOwnerId, auto)
-        : undefined) ??
+      (ownerId ? this.focusLimit(i.platform, i.accountId, ownerId, auto) : undefined) ??
       this.replyLimit(
         i.platform,
         i.accountId,
         i.target.parent === '0' ? undefined : i.authorId,
         !i.focusOwnerId || auto,
-        auto,
+        Boolean(ownerId && hasIndependentOwnerComments(i.platform)),
       )
     );
   }
@@ -353,6 +386,11 @@ export class SocialService {
     }
     return { requeued };
   }
+  private postingAllowsTarget(platform: string, target: CommentTarget) {
+    const settings = this.cfg.platforms[platform]?.posting;
+    return Boolean(settings?.enabled && (target.parent !== '0' ||
+      (platform !== 'tieba' && (platform !== 'xiaohongshu' || settings.allowTopLevelComments === true))));
+  }
   pendingReplies(ownerCommentsOnly = false) {
     if (this.storageLimit()) return [];
     return this.store
@@ -361,13 +399,13 @@ export class SocialService {
         (i) =>
           (!ownerCommentsOnly || Boolean(i.focusOwnerId && i.notificationType === 'focus-comment' && i.target.parent !== '0')) &&
           this.notificationEnabled(i, true) &&
-          this.cfg.platforms[i.platform].posting.enabled &&
+          this.postingAllowsTarget(i.platform, i.target) &&
           !this.hasNotificationSend(i) &&
           assessPublicInput(i.text).action !== 'skip' &&
           !this.notificationLimit(i),
       );
   }
-  async deliver(sink: (item: InboxItem) => Promise<void>, recoverPending = false) {
+  async deliver(sink: (item: InboxItem) => Promise<void>, recoverPending = false, ownerCommentsOnly = false) {
     if (this.delivering || this.storageLimit()) return;
     this.delivering = true;
     try {
@@ -376,6 +414,9 @@ export class SocialService {
         .inbox()
         .filter(
           (i) =>
+            (!ownerCommentsOnly || (
+              hasIndependentOwnerComments(i.platform) && this.autoReply(i) && this.postingAllowsTarget(i.platform, i.target)
+            )) &&
             this.notificationEnabled(i, recoverPending) &&
             !this.hasNotificationSend(i) &&
             !(
@@ -435,10 +476,8 @@ export class SocialService {
     const focus = this.focusFor(platform);
     if (!focus.settings.enabled || focus.binding(accountId)?.ownerId !== ownerId)
       return '特别关注已停用或绑定改变，本条不再主动参与。';
-    if (autoReply) {
-      if (!focus.settings.autoReplyNewComments) return '主人评论区自动回应已关闭。';
-      return;
-    }
+    if (autoReply && !focus.settings.autoReplyNewComments) return '主人评论区自动回应已关闭。';
+    if (autoReply || hasIndependentOwnerComments(platform)) return;
     const today = this.day(new Date().toISOString());
     if (
       this.store
@@ -467,10 +506,9 @@ export class SocialService {
     accountId: string,
     recipientId: string | undefined,
     notification: boolean,
-    autoReply = false,
+    independentOwnerComment: boolean,
   ) {
-    // This flag is derived from a locally bound owner-comment notification, never tool arguments.
-    if (autoReply) return;
+    if (independentOwnerComment) return;
     const today = this.day(new Date().toISOString());
     const records = this.store
       .outbox()
@@ -478,17 +516,17 @@ export class SocialService {
         (r) =>
           r.platform === platform &&
           r.accountId === accountId &&
-          !r.ownerAutoReply &&
+          !isOwnerCommentRecord(r) &&
           r.status !== 'rejected' &&
           this.day(r.createdAt) === today,
       );
     if (records.length >= this.cfg.platforms[platform].posting.maxDailyComments)
       return '已达到操作员设置的普通每日发布上限。';
-    if (
-      recipientId &&
-      records.filter((r) => this.recipient(r) === recipientId).length >= MAX_REPLIES_PER_PERSON
-    )
-      return '今天已回应这位用户五条，请留到明天，不换楼层继续。';
+    const boundOwner = platform === 'bilibili' && notification && recipientId && this.cfg.focus.enabled &&
+      this.focus.binding(accountId)?.ownerId === recipientId;
+    const personLimit = boundOwner ? (this.cfg.focus.outsideReplyLimit ?? MAX_REPLIES_PER_PERSON) : MAX_REPLIES_PER_PERSON;
+    if (recipientId && records.filter(r => this.recipient(r) === recipientId).length >= personLimit)
+      return boundOwner ? '今天对绑定主人账号的普通回复已达到设置上限。' : '今天已回应这位用户五条，请留到明天，不换楼层继续。';
     if (
       notification &&
       records.filter((r) => Boolean(r.inboxId) && (!r.focusOwnerId || r.ownerAutoReply)).length >=
@@ -548,22 +586,19 @@ export class SocialService {
     });
   }
   async verifyRecent(signal?: AbortSignal) {
+    const account = this.states.get('bilibili')?.account;
+    if (!account || !this.cfg.platforms.bilibili.enabled || signal?.aborted) return;
     const now = Date.now();
-    const recent = this.store
-      .outbox()
-      .filter(
-        (r) =>
-          r.status === 'sent' &&
-          r.receiptId &&
-          this.cfg.platforms[r.platform]?.enabled &&
-          r.visibility?.status !== 'self-only' &&
-          now - Date.parse(r.createdAt) < 180000 &&
-          (!r.visibility || now - Date.parse(r.visibility.checkedAt) >= 20000),
-      )
-      .slice(-2);
-    for (const r of recent) {
-      if (signal?.aborted) break;
-      await this.verify(r.id, signal).catch(() => {});
+    const record = this.store.outbox().find(r => {
+      const age = now - Date.parse(r.createdAt);
+      // One later check per accepted reply. Manual verification remains available.
+      return r.platform === 'bilibili' && r.accountId === account.id && r.status === 'sent' && r.receiptId &&
+        r.visibility?.status === 'unconfirmed' && age >= 5 * 60000 && age < 86400000 &&
+        !r.visibilityFollowupAt && now - Date.parse(r.visibility.checkedAt) >= 5 * 60000;
+    });
+    if (record) {
+      this.store.updateSend(record.id, { visibilityFollowupAt: new Date(now).toISOString() });
+      await this.verify(record.id, signal).catch(() => {});
     }
   }
   async publish(input: PublishInput, signal?: AbortSignal) {
@@ -584,6 +619,10 @@ export class SocialService {
     } else {
       target = adapter.normalizeTarget(input.target);
     }
+    if (!this.postingAllowsTarget(input.platform, target))
+      throw Error(input.platform === 'xiaohongshu' && target.parent === '0'
+        ? '请先在小红书设置中开启「允许在主人作品下新发评论」。'
+        : '本站当前仅支持回复已经核实的主楼。');
     const requestId = input.inboxId ? `reply:${input.inboxId}` : input.requestId;
     if (!requestId || (!input.inboxId && requestId.length > 180) || /[\r\n]/.test(requestId))
       throw new Error('新评论须提供固定 requestId；重试沿用原值。');
@@ -591,6 +630,9 @@ export class SocialService {
     const recover = () => {
       const prior = this.store.operationSends(operationId).at(-1);
       if (!prior) return;
+      if (prior.status === 'rejected' && !input.retryRejected && prior.text !== text &&
+          JSON.stringify(prior.target) === JSON.stringify(target))
+        throw Error('上次明确未提交。核对上次原因并解决后，可沿用原操作编号和目标，携新草稿的 briefId 与 retryRejected=true 重试。上次原因：' + prior.detail);
       if (
         (prior.text !== text && !(input.retryRejected && prior.status === 'rejected')) ||
         JSON.stringify(prior.target) !== JSON.stringify(target)
@@ -712,24 +754,14 @@ export class SocialService {
     const source = savedSource
       ? { ...savedSource, ownerAutoReply: this.autoReply(savedSource) || undefined }
       : undefined;
-    const focus = this.focusFor(input.platform);
-    const focusBinding = focus.settings.enabled ? focus.binding(account.id) : undefined;
-    const focusOwnerId =
-      source?.focusOwnerId ??
-      (focusBinding &&
-      this.store
-        .focusWorks()
-        .some(
-          (w) =>
-            (w.platform ?? 'bilibili') === input.platform &&
-            w.accountId === account.id &&
-            w.ownerId === focusBinding.ownerId &&
-            w.video.aid === target.oid,
-        )
-        ? focusBinding.ownerId
-        : undefined);
+    const workOwnerId = this.focusWorkOwner(input.platform, account.id, target);
+    const focusOwnerId = source?.focusOwnerId ?? workOwnerId;
+    const independentOwnerComment = Boolean(focusOwnerId && hasIndependentOwnerComments(input.platform));
+    const standalone = input.platform === 'xiaohongshu' && target.parent === '0';
+    if (standalone && (!workOwnerId || focusOwnerId !== workOwnerId))
+      throw new PublicReplySkipped('小红书独立评论仅支持已核实的主人作品。');
     if (
-      source?.focusOwnerId &&
+      (source?.focusOwnerId || independentOwnerComment) &&
       this.store.hasSend(input.platform, account.id, target.oid, target.parent)
     )
       throw new PublicReplySkipped(
@@ -754,7 +786,7 @@ export class SocialService {
       account.id,
       recipientId,
       Boolean(input.inboxId && (!source?.focusOwnerId || source?.ownerAutoReply)),
-      Boolean(source?.ownerAutoReply),
+      independentOwnerComment,
     );
     if (limit) {
       if (input.inboxId)
@@ -774,7 +806,10 @@ export class SocialService {
       (typeof input.roamId !== 'string' || input.roamId.length > 80)
     )
       throw Error('闲逛编号无效');
-    if (!input.inboxId) this.roaming.canPublish(input.roamId, target.oid, input.platform);
+    if (input.roamId && independentOwnerComment)
+      this.roaming.usePlatform(input.roamId, input.platform);
+    else if (!input.inboxId)
+      this.roaming.canPublish(input.roamId, target.oid, input.platform);
     const id = attempts.length ? `${operationId}:attempt:${attempts.length + 1}` : operationId;
     const records = this.store
       .outbox()
@@ -800,18 +835,8 @@ export class SocialService {
         this.store.updateInbox(input.inboxId, { delivered: false });
       throw new Error(`距离上次发送不足 ${cfg.minIntervalSec} 秒，请稍后再试。`);
     }
-    if (
-      !source?.ownerAutoReply &&
-      records.filter(
-        (r) => !r.ownerAutoReply && this.day(r.createdAt) === this.day(new Date().toISOString()),
-      ).length >= cfg.maxDailyComments
-    ) {
-      if (source?.ownerAutoReply && input.inboxId)
-        this.store.updateInbox(input.inboxId, { delivered: false });
-      throw new Error('已达到操作员设置的每日发布上限。');
-    }
     signal?.throwIfAborted();
-    if (!this.cfg.platforms[input.platform]?.enabled || !cfg.enabled)
+    if (!this.cfg.platforms[input.platform]?.enabled || !this.postingAllowsTarget(input.platform, target))
       throw new Error('公开发布已关闭。');
     const storageLimit = this.storageLimit();
     if (storageLimit) {
@@ -839,7 +864,7 @@ export class SocialService {
       recipientId,
       focusOwnerId,
       ownerAutoReply: source?.ownerAutoReply,
-      roamId: input.roamId,
+      roamId: independentOwnerComment ? undefined : input.roamId,
       mention,
       preparation: input.preparation
         ? { ...input.preparation, judgment: participation }

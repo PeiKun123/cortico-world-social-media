@@ -1,6 +1,10 @@
+import { CHAT_SCENES } from '../expression-scenes.ts';
 import type { WebUiPanelContext } from 'cortico/web/shared/client-panel.ts';
 import type { ExpressionPractice, ExpressionSample } from '../expression.ts';
-import { PUBLIC_POST_TRIAL_ENABLED } from '../config.ts';
+import type { SocialPlatformConfig } from '../config.ts';
+import { PUBLIC_POST_NAMES, type PublicPostPlatform } from '../public-post-policy.ts';
+
+export type PublicPlatformSettings = Partial<Record<PublicPostPlatform, SocialPlatformConfig & { bound: boolean; loginOpen?: boolean; paused?: string; account?: { name: string }; focusStatus?: { binding?: { name: string }; check?: { error?: string }; reading?: { cachedWorks: number } } }>>;
 
 type Snapshot = {
   settings: { corpus?: boolean; practice?: boolean; training?: boolean; tieba?: boolean; xiaohongshu?: boolean };
@@ -13,13 +17,17 @@ type Snapshot = {
   practicePage: number;
   practicePages: number;
   practiceTotal: number;
-  handbook: Array<{ id: string; lesson: string; choice: string; source?: string }>;
+  activeTotal: number;
+  archivedTotal: number;
+  archivable: number;
+  handbookTotal: number;
+  handbook: Array<{ id: string; chatUse?: ExpressionPractice['chatUse']; lesson: string; choice: string; source?: string }>;
 };
 function textPreview(text: string) {
   if (!text) return '练习记录';
   return text.length > 78 ? text.slice(0, 78) + '…' : text;
 }
-export function expressionSettings(ctx: WebUiPanelContext) {
+export function expressionSettings(ctx: WebUiPanelContext, refreshPublic: () => Promise<void>) {
   function el<K extends keyof HTMLElementTagNameMap>(tag: K, text = '') {
     const node = document.createElement(tag);
     if (text) node.textContent = text;
@@ -33,6 +41,7 @@ export function expressionSettings(ctx: WebUiPanelContext) {
   const list = el('div');
   let queryValue = '';
   let practicePage = 1;
+  let archived = false;
   let lastRendered = '';
   let revision = 0;
   function action(title: string, fn: () => Promise<void>) {
@@ -48,7 +57,7 @@ export function expressionSettings(ctx: WebUiPanelContext) {
     }, { signal: ctx.signal });
     return button;
   }
-  function toggle(label: string, checked: boolean, fn?: (value: boolean) => Promise<void>) {
+  function toggle(label: string, checked: boolean, fn?: (value: boolean) => Promise<void>, feedback: HTMLElement = status) {
     const row = el('label');
     const input = el('input');
     input.type = 'checkbox';
@@ -58,17 +67,34 @@ export function expressionSettings(ctx: WebUiPanelContext) {
       const value = input.checked;
       input.disabled = true;
       try { await fn(value); }
-      catch (error) { input.checked = !value; status.textContent = error instanceof Error ? error.message : '保存失败。'; }
+      catch (error) { input.checked = !value; feedback.textContent = error instanceof Error ? error.message : '保存失败。'; }
       finally { input.disabled = false; }
     }, { signal: ctx.signal });
     return { row, input };
   }
+  function chatUsage(row: Pick<ExpressionPractice, 'id'|'chatUse'>, lesson: string, query: string) {
+    const use = el('details');
+    use.append(el('summary', row.chatUse ? '日常聊天 · 已采用' : '用于日常聊天'),
+      el('p', '选择场景，留一句愿意让小K采用的表达建议。同一场景采用一条建议，新的选择会替换旧建议。停用后保留原练习。'));
+    const scene = el('select'); scene.setAttribute('aria-label', '适用场景');
+    for (const [key, label] of Object.entries(CHAT_SCENES)) { const opt = el('option', label); opt.value = key; scene.append(opt); }
+    const advice = el('textarea'); advice.maxLength = 120; advice.setAttribute('aria-label','日常表达提示');
+    advice.value = row.chatUse?.advice ?? (lesson.length <= 120 ? lesson : '');
+    advice.placeholder = '用自己的话写一句可迁移的技巧，最多120字。';
+    if (row.chatUse) scene.value = row.chatUse.scene;
+    use.append(scene, advice, action('采用到日常聊天', async () => {
+      await ctx.invoke('expressionChatUse', [row.id, scene.value, advice.value]); await refresh(query);
+    }));
+    if (row.chatUse) use.append(action('停用日常提示', async () => {
+      await ctx.invoke('expressionChatUse', [row.id, null]); await refresh(query);
+    }));
+    return use;
+  }
   async function refresh(query = queryValue, requestedPage = practicePage) {
     queryValue = query;
     const ticket = ++revision;
-    const next = await ctx.invoke<Snapshot>('expressionList', [query, requestedPage]);
+    const next = await ctx.invoke<Snapshot>('expressionList', [query, requestedPage, archived]);
     if (ctx.signal.aborted || ticket !== revision) return;
-    corpus.input.checked = next.settings.corpus === true;
     practice.input.checked = next.settings.practice === true;
     controls.hidden = !practice.input.checked;
     training.input.checked = next.settings.training === true;
@@ -77,10 +103,9 @@ export function expressionSettings(ctx: WebUiPanelContext) {
     connection.textContent = next.trainingBlocked ? '训练已暂停 · ' + next.trainingBlocked :
       next.running ? '正在和 Gemini 聊天' : next.invited ? '等小K选话题' :
       next.bound ? training.input.checked ? '训练已开启，空闲后继续' : '已绑定教学会话' : '尚未绑定教学会话';
-    for (const [key, field] of publicFields) field.input.checked = next.settings[key] === true;
     const previousPage = practicePage;
     practicePage = next.practicePage;
-    const rendered = JSON.stringify([query, next.samples, next.practicePage, next.practiceTotal, next.practices, next.handbook]);
+    const rendered = JSON.stringify([query, archived, next.archivedTotal, next.archivable, next.handbookTotal, next.samples, next.practicePage, next.practiceTotal, next.practices, next.handbook]);
     if (rendered === lastRendered) return;
     lastRendered = rendered;
     const opened = [...list.querySelectorAll<HTMLDetailsElement>(':scope > details')].map(details => details.open);
@@ -105,10 +130,19 @@ export function expressionSettings(ctx: WebUiPanelContext) {
     list.append(materials);
     const records = el('details');
     records.className = 'sm-practice-history';
-    records.append(el('summary', '最近练习 · ' + next.practiceTotal));
+    records.append(el('summary', (archived ? '已归档练习 · ' : '最近练习 · ') + next.practiceTotal));
     const guide = el('p', '每页最多 3 条。点开一条，即可查看对话和复盘。');
     guide.className = 'sm-practice-guide';
-    records.append(guide);
+    records.append(guide, el('p', '当前练习 ' + (next.activeTotal ?? next.practiceTotal) + '/300 · 已归档 ' + (next.archivedTotal ?? 0) + '。满额后新练习自动归档最早一条已评估记录，保留原文及采纳状态。'));
+    if (next.archivable) records.append(action('归档已评估练习（' + next.archivable + '）', async () => {
+      const count = await ctx.invoke<number>('expressionArchiveReviewed', []);
+      status.textContent = '已归档 ' + count + ' 条，可在归档中查看。';
+      await refresh(query, 1);
+    }));
+    if (next.archivedTotal || archived) records.append(action(archived ? '返回当前练习' : '查看已归档练习', async () => {
+      archived = !archived;
+      await refresh(query, 1);
+    }));
     if (!next.practiceTotal) records.append(el('p', '还没有练习记录。'));
     if (next.practicePages > 1) {
       const navigation = el('nav');
@@ -167,6 +201,7 @@ export function expressionSettings(ctx: WebUiPanelContext) {
             await ctx.invoke('expressionAdopt', [row.id, !inHandbook]);
             await refresh(query);
           }));
+        review.append(chatUsage(row, r.lesson, query));
         card.append(review);
       } else if (row.status === 'review') card.append(el('p', '点评已收到，等小K记录取舍与新题。'));
       if (row.status !== 'running' && !inHandbook) card.append(action('移除练习记录', async () => {
@@ -178,7 +213,7 @@ export function expressionSettings(ctx: WebUiPanelContext) {
     }
     list.append(records);
     const handbook = el('details');
-    handbook.append(el('summary', '说话手册'), el('p', '小K评估后留下的表达经验，可以按话题检索。你也可以手动收录或撤回。'));
+    handbook.append(el('summary', '说话手册 · ' + (next.handbookTotal ?? next.handbook.length)), el('p', '按话题找练习，展开「用于日常聊天」采纳或停用一条建议。启用人格化练习后，配套 QQ 与陪伴会按当前场景取用，无需启动 Gemini 训练。'));
     const search = el('input');
     search.type = 'search';
     search.value = query;
@@ -188,7 +223,7 @@ export function expressionSettings(ctx: WebUiPanelContext) {
       const rendered = list.lastElementChild as HTMLDetailsElement | null;
       if (rendered) rendered.open = true;
     }));
-    for (const row of next.handbook) handbook.append(el('p', row.lesson + (row.source ? ' · ' + row.source : '')));
+    for (const row of next.handbook) handbook.append(el('p', row.lesson + (row.source ? ' · ' + row.source : '')), chatUsage(row, row.lesson, query));
     if (!next.handbook.length) handbook.append(el('p', '没有匹配的已收录经验。'));
     list.append(handbook);
     [materials, records, handbook].forEach((details, i) => { details.open = opened[i] ?? false; });
@@ -197,18 +232,71 @@ export function expressionSettings(ctx: WebUiPanelContext) {
     await ctx.invoke('settings', [{ ['worlds.socialmedia.experiments.' + key]: value }]);
     await refresh();
   };
-  const corpus = toggle('语料学习', false, save('corpus'));
   const practice = toggle('人格化练习', false, save('practice'));
   const training = toggle('开始训练', false, save('training'));
-  const publicPosts = el('section');
-  publicPosts.className = 'sm-public-posts';
-  publicPosts.append(el('h3', '贴吧与小红书 · 公开帖试读（实验）'), el('p', '搜一个话题试试，或者直接粘贴原帖链接。小K也可以按你的话题搜帖，并在开启语料学习时收藏已读原文。试读仅查看官网当前展示的正文和评论，专用窗口登录或验证后的读取效果仍需实测。'));
-  const publicCards = el('div');
-  publicCards.className = 'sm-experiment-cards';
-  publicPosts.append(publicCards);
-  const publicFields = PUBLIC_POST_TRIAL_ENABLED ? (['tieba', 'xiaohongshu'] as const).map(key => {
-    const label = key === 'tieba' ? '百度贴吧' : '小红书';
-    const field = toggle('启用' + label + '（实验）', false, save(key));
+  const publicFields = (['xiaohongshu', 'tieba'] as const).map(key => {
+    const label = PUBLIC_POST_NAMES[key];
+    const result = el('pre');
+    result.setAttribute('role', 'status');
+    result.className = 'sm-public-result';
+    const savePlatform = async (values: Record<string, boolean | string | number>) => {
+      await ctx.invoke('settings', [Object.fromEntries(Object.entries(values).map(([name, value]) =>
+        ['worlds.socialmedia.platforms.' + key + '.' + name, value]))]);
+      await refreshPublic();
+    };
+    const field = toggle('启用' + label + (key === 'tieba' ? '（实验）' : ''), false, value => savePlatform({ enabled: value }), result);
+    const posting = toggle('允许公开发言', false, value => savePlatform({ 'posting.enabled': value }), result);
+    const standalone = key === 'xiaohongshu'
+      ? toggle('允许在主人作品下新发评论', false, value => savePlatform({ 'posting.allowTopLevelComments': value }), result)
+      : undefined;
+    const focus = toggle('优先看主人作品', false, value => savePlatform({ 'focus.enabled': value }), result);
+    const reply = toggle(key === 'xiaohongshu' ? '逐条考虑主人作品的新评论' : '自动回应主人作品的新评论',
+      false, value => savePlatform({ 'focus.autoReplyNewComments': value }), result);
+    const existingReplies = key === 'xiaohongshu'
+      ? toggle('也考虑已有的评论', false, value => savePlatform({ 'focus.replyExistingComments': value }), result)
+      : undefined;
+    const interval = el('input');
+    interval.type = 'number';
+    interval.min = '2';
+    interval.max = '60';
+    interval.step = '1';
+    const intervalRow = el('label', '新评论检查间隔（分钟） ');
+    intervalRow.append(interval);
+    interval.addEventListener('change', () => {
+      if (!interval.value || !interval.reportValidity()) return;
+      void savePlatform({ 'focus.autoReplyIntervalMinutes': interval.valueAsNumber }).catch(error => {
+        result.textContent = error instanceof Error ? error.message : String(error);
+      });
+    });
+    const owner = el('input');
+    owner.type = 'url';
+    owner.placeholder = label + '主人个人主页完整链接';
+    owner.setAttribute('aria-label', owner.placeholder);
+    owner.maxLength = 1500;
+    const visual = el('select');
+    const visualLabel = el('label', '画面档位 ');
+    visual.setAttribute('aria-label', '画面档位');
+    visualLabel.append(visual);
+    visualLabel.className = 'sm-platform-visual-control';
+    visualLabel.append(el('small', '实际张数取决于原帖和画面预算。'));
+    for (const [value, caption] of [
+      ['low', '低 · 省额度 · 1 张图 / 2 帧'],
+      ['medium', '中 · 日常 · 3 张图 / 5 帧'],
+      ['high', '高 · 看细节 · 6 张图 / 9 帧'],
+    ]) {
+      const option = el('option', caption);
+      option.value = value;
+      visual.append(option);
+    }
+    const accountState = el('p');
+    accountState.setAttribute('aria-live', 'polite');
+    visual.value = 'medium';
+    visual.addEventListener('change', () => {
+      void savePlatform({ postVisual: visual.value }).catch(error => {
+        result.textContent = error instanceof Error ? error.message : '画面档位未保存。';
+        void refreshPublic().catch(() => {});
+      });
+    }, { signal: ctx.signal });
     const url = el('input');
     url.type = 'url';
     url.placeholder = label + '原帖链接';
@@ -219,12 +307,12 @@ export function expressionSettings(ctx: WebUiPanelContext) {
     query.maxLength = 80;
     query.placeholder = '话题，例如「我的世界」';
     query.setAttribute('aria-label', label + '搜索话题');
-    const result = el('pre');
-    result.setAttribute('aria-live', 'polite');
     const matches = el('ul');
     matches.className = 'sm-public-matches';
     matches.setAttribute('aria-label', label + '搜索结果');
-    const card = el('article');
+    const card = el('section');
+    card.className = 'sm-config-section sm-platform-card sm-public-posts';
+    card.dataset.platform = key;
     card.tabIndex = -1;
     let busy = false;
     const run = async (message: string, fn: () => Promise<void>) => {
@@ -269,16 +357,89 @@ export function expressionSettings(ctx: WebUiPanelContext) {
       searchButton.click();
     }, { signal: ctx.signal });
     searchRow.append(query, searchButton);
-    card.append(el('h4', label), field.row,
+    const focusSection = el('details');
+    focusSection.className = 'sm-subsection sm-platform-focus';
+    const readSection = el('details');
+    readSection.className = 'sm-subsection';
+    const focusState = el('p');
+    focusState.setAttribute('role', 'status');
+    const closeLogin = action('关闭专用窗口', async () => {
+      const closed = await ctx.invoke<{ message: string }>('expressionPublicClose', [key]);
+      result.textContent = closed.message;
+      await refreshPublic();
+    });
+    closeLogin.hidden = true;
+    card.append(el('h3', label + ' · 账号与交流'), field.row, accountState,
       el('p', (key === 'tieba' ? '若贴吧弹出验证，请先在专用窗口处理。' : '小红书通常需要先在专用窗口登录。') +
-        '完成后关闭窗口，再搜索或试读。'),
+        '登录后保留专用窗口，回到这里点「核对并绑定登录账号」。绑定成功后专用窗口会关闭。'),
       action('打开' + label + '专用登录窗口', () => run('正在打开专用窗口…', async () => {
         const opened = await ctx.invoke<{ message: string }>('expressionPublicLogin', [key]);
         result.textContent = opened.message;
-      })), searchRow, matches, url, action('读取' + label + '公开帖', readPost), result);
-    publicCards.append(card);
-    return [key, { ...field, card }] as const;
-  }) : [];
+        await refreshPublic();
+      })),
+      action('核对并绑定登录账号', () => run('正在核对登录账号…', async () => {
+        const connected = await ctx.invoke<{ message: string }>('expressionPublicConnect', [key]);
+        result.textContent = connected.message;
+        await refreshPublic();
+      })),
+      closeLogin,
+      el('p', '账号绑定后，开启闲逛总开关即可按兴趣刷帖。可以在下方为本站选择活跃度。'),
+      posting.row, visualLabel,
+      focusSection, readSection, result);
+    focusSection.append(el('summary', '特别关注'),
+      el('p', '粘贴主人在本站的个人主页，优先看主人新发的图文或视频。请用小K的账号登录，主人主页填写你自己的账号。'),
+      focusState, focus.row, owner,
+      action('保存主人主页', () => run('正在核对主人主页…', async () => {
+        const address = owner.value.trim();
+        if (!address) throw Error('请粘贴平台官方网站的主人个人主页。');
+        await savePlatform({ 'focus.account': address, 'focus.enabled': true });
+        const checked = await ctx.invoke<{ binding?: { name: string }; check?: { error?: string } }>('expressionPublicFocus', [key]);
+        result.textContent = checked.check?.error ?? (checked.binding ? '已绑定特别关注：' + checked.binding.name : '主页未能核实。');
+        await refreshPublic();
+      })),
+      reply.row,
+      ...(key === 'xiaohongshu' ? [intervalRow] : []),
+      ...(existingReplies ? [existingReplies.row] : []),
+      ...(standalone ? [standalone.row] : []),
+      el('p', key === 'xiaohongshu'
+        ? '按官网能加载的评论分批判断。有话才回，带图先看图。主人评论区独立检查，闲逛关闭也能回复；还受模型当前任务和平台发送间隔影响。开启新发评论后，每条主人作品最多一条独立评论。'
+        : '主要用于看帖和收集语料。公开回复按原楼层核对并计入额度。'),
+    );
+    readSection.append(el('summary', '搜索与读取检查'),
+      el('p', '按话题搜索或粘贴原帖链接，检查读到的正文和评论。'),
+      action('检查推荐流', () => run('正在试读推荐帖…', async () => {
+        const tested = await ctx.invoke<{ title: string; url: string; detail: string }>('expressionPublicFeedCheck', [key]);
+        result.textContent = [tested.title, tested.url, tested.detail].join('\n');
+      })),
+      searchRow, matches, url, action('读取' + label + '公开帖', readPost));
+    return [key, { card, render(state: PublicPlatformSettings[PublicPostPlatform], ownerCount?: number | null) {
+      if (!state) return;
+      field.input.checked = state.enabled;
+      closeLogin.hidden = !state.loginOpen;
+      focus.input.checked = state.focus?.enabled === true;
+      posting.input.checked = state.posting.enabled;
+      if (standalone) standalone.input.checked = state.posting.allowTopLevelComments === true;
+      reply.input.checked = state.focus?.autoReplyNewComments === true;
+      if (existingReplies) existingReplies.input.checked = state.focus?.replyExistingComments === true;
+      if (key === 'xiaohongshu' && document.activeElement !== interval)
+        interval.value = String(state.focus?.autoReplyIntervalMinutes ?? 5);
+      visual.value = state.postVisual ?? 'medium';
+      if (document.activeElement !== owner && !owner.value) owner.value = state.focus?.account ?? '';
+      focusState.textContent = state.focusStatus?.check?.error ?? (state.focusStatus?.binding
+        ? '已确认主人：' + state.focusStatus.binding.name +
+          (key === 'xiaohongshu' && state.enabled && state.focus?.enabled && ownerCount != null
+            ? ' · 主人评论区今日发言 ' + ownerCount + ' 条 · 独立计数' : '')
+        : '尚未核对主人主页');
+      accountState.textContent = (state.account ? '已核对登录账号：' + state.account.name : state.bound ? '已绑定，等待本次核对' : '未绑定登录账号') +
+        (state.focusStatus?.binding ? ' · 主人：' + state.focusStatus.binding.name : '') +
+        (state.loginOpen ? ' · 专用窗口已打开，等待绑定' : '') +
+        (state.paused ? ' · 已暂停：' + state.paused : '');
+    } }] as const;
+  });
+  function renderPublic(states?: PublicPlatformSettings, xiaohongshuOwnerCount?: number | null) {
+    for (const [key, platform] of publicFields)
+      platform.render(states?.[key], key === 'xiaohongshu' ? xiaohongshuOwnerCount : undefined);
+  }
   const controls = el('div');
   controls.className = 'sm-experiment-controls';
   controls.hidden = true;
@@ -325,15 +486,16 @@ export function expressionSettings(ctx: WebUiPanelContext) {
   );
   const cards = el('div');
   cards.className = 'sm-experiment-cards';
-  const learningCard = el('article');
-  learningCard.append(corpus.row, el('p', '小K刷到有意思的公开帖子或评论时，可以摘一小段，学怎么接梗、说具体、表达不同意见。沿用闲逛阅读额度。小K筛选和整理时仍会用到当前模型。'));
   const practiceCard = el('article');
   practiceCard.append(practice.row,
     el('p', '实验性网页陪练。小K自己选话题和 Gemini 聊，再试试学到的表达。网页版限额、登录失效或页面变动都可能暂停练习。'),
-    el('p', '开启「开始训练」后消耗较高，建议按需开启。'), controls);
-  cards.append(learningCard, practiceCard);
+    el('p', '开启「开始训练」后消耗较高，建议按需开启。'),
+    el('p', '账号风险提示：自动连续访问 Gemini 网页可能触发 Google 人工验证、限流或账号使用限制。遇到提示请关闭训练，在专用窗口查看账号状态。'), controls);
+  const ownerPractice = el('article');
+  ownerPractice.append(el('h4', '和主人练一句'), el('p',
+    '在私聊或本地控制台里直接说「陪我练一句」。小K先找出一句明显像套话的表达，再只问一句「这句听着奇怪吗？」也可以告诉它你会怎么说。需要时才练，沿用当前聊天的模型，不另外打开 Gemini。'));
+  cards.append(practiceCard, ownerPractice);
   body.className = 'sm-experiment-body';
-  if (PUBLIC_POST_TRIAL_ENABLED) body.append(publicPosts);
   body.append(cards, action('刷新练习与素材', () => refresh()), status, list);
   section.append(el('summary', '实验功能'), body);
   section.addEventListener('toggle', () => {
@@ -345,11 +507,7 @@ export function expressionSettings(ctx: WebUiPanelContext) {
   }, 12000);
   return {
     element: section,
-    openPublic(platform: 'tieba' | 'xiaohongshu') {
-      section.open = true;
-      const card = publicFields.find(([key]) => key === platform)?.[1].card;
-      card?.focus({ preventScroll: true });
-      card?.scrollIntoView({ block: 'center' });
-    },
+    publicPanels: publicFields.map(([key, platform]) => [key, PUBLIC_POST_NAMES[key], platform.card] as const),
+    renderPublic,
   };
 }
