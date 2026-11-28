@@ -1,10 +1,10 @@
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { chromium, type BrowserContext, type Page, type Request } from 'playwright-core';
+import { chromium, type BrowserContext, type Page, type Request, type Response } from 'playwright-core';
 import { findBrowserExecutable } from './bilibili-browser.ts';
 
 import { PlatformError, type Account, type CommentTarget, type PublicComment, type SendReceipt, type SocialPlatform, type Video } from '../platform.ts';
-import { POST_ORIGINS, PUBLIC_POST_NAMES, PUBLIC_POST_TYPES, profileId, profileUrl, type PublicPostPlatform } from '../public-post-policy.ts';
+import { POST_ORIGINS, PUBLIC_POST_NAMES, PUBLIC_POST_TYPES, profileId, profileUrl, tiebaForumUrl, type PublicPostPlatform } from '../public-post-policy.ts';
 export { isPublicPostPlatform, PUBLIC_POST_NAMES, type PublicPostPlatform } from '../public-post-policy.ts';
 
 interface PublicPageOptions {
@@ -130,10 +130,22 @@ export class PublicPostBrowser {
       if (!login) await context.route('**/*', route => {
         const request = route.request();
         const address = new URL(request.url());
-        // The official Tieba thread page loads its public body and floors via this read query.
-        const tiebaRead = platform === 'tieba' && request.method() === 'POST' && request.resourceType() === 'xhr' &&
-          address.origin === POST_ORIGINS.tieba && address.pathname === '/c/f/pb/page_pc' &&
-          /^https:\/\/tieba\.baidu\.com\/p\/\d+(?:[/?#]|$)/.test(request.frame().url());
+        let tiebaRead = false;
+        if (platform === 'tieba' && request.method() === 'POST' && request.resourceType() === 'xhr' && address.origin === POST_ORIGINS.tieba) {
+          const frame = URL.parse(request.frame().url());
+          if (frame?.origin === POST_ORIGINS.tieba) {
+            tiebaRead = address.pathname === '/c/f/pb/page_pc' && /^\/p\/\d+\/?$/.test(frame.pathname);
+            // The forum UI loads its header and thread cards in parallel, with the same encoded bar name.
+            if (['/c/f/frs/frsBottom_pc', '/c/f/frs/page_pc'].includes(address.pathname) && frame.pathname === '/f') {
+              const forum = frame.searchParams.get('kw');
+              try {
+                const posted = request.postDataJSON()?.kw;
+                tiebaRead = Boolean(forum && typeof posted === 'string' &&
+                  (posted === forum || decodeURIComponent(posted) === forum));
+              } catch { /* unrelated request */ }
+            }
+          }
+        }
         let noteRead = false;
         const noteId = options.readNote?.()?.id;
         if (platform === 'xiaohongshu' && noteId && request.method() === 'POST' &&
@@ -184,7 +196,7 @@ export class PublicPostBrowser {
     }
   }
 
-  async read(platform: PublicPostPlatform, input: string, signal: AbortSignal) {
+  async read(platform: PublicPostPlatform, input: string, signal: AbortSignal, latestReplies = false) {
     const url = publicPostUrl(platform, input);
     return this.withPublicPage(platform, signal, async page => {
       const response = await page.goto(url.href, { waitUntil: 'domcontentloaded', timeout: 18000 });
@@ -198,17 +210,22 @@ export class PublicPostBrowser {
         .first().textContent({ timeout: 1500 }).catch(() => ''))?.trim().slice(0, 160) || (await page.title()).slice(0, 160);
       const texts = await page.locator(postSelector).filter({ visible: true }).evaluateAll(nodes =>
         nodes.slice(0, 9).map(node => (node as HTMLElement).innerText.trim().slice(0, 700)));
-      if (!texts[0]) {
+      const titleOnlyTieba = platform === 'tieba' && (await page.locator('.image-text .pb-title, .core_title_txt')
+        .filter({ visible: true }).count()) === 1;
+      if (!texts[0] && !titleOnlyTieba) {
         await checkAccessNotice(page);
         throw Error('官网没有展示可识别的原帖正文，可能已删除或页面结构有变化。');
       }
+      const newest = latestReplies && platform === 'tieba' && await newestTiebaComments(page, url.pathname.split('/').at(-1)!);
       const modernTieba = page.locator('.pb-comment-item[data-id] > .comment-content .pb-rich-text');
       const comments = platform === 'tieba' && !await modernTieba.count() ? texts.slice(1) :
         await (platform === 'tieba' ? modernTieba : page.locator('.comments-container .comment-item .content'))
           .filter({ visible: true }).evaluateAll(nodes =>
             nodes.slice(0, 8).map(node => (node as HTMLElement).innerText.trim().slice(0, 500)));
-      return { title, text: texts[0], comments: comments.filter(Boolean), url: url.origin + url.pathname,
-        detail: comments.some(Boolean) ? '读取首屏公开内容；未加载隐藏或更多回复。' : '当前公开页面未展示可读评论。', externalContent: true };
+      return { title, text: texts[0] || '此帖没有额外的正文文字。', comments: comments.filter(Boolean), url: url.origin + url.pathname,
+        detail: comments.some(Boolean)
+          ? newest ? '按官网倒序读取最新楼层。' : '读取首屏公开内容；未加载隐藏或更多回复。'
+          : '当前公开页面未展示可读评论。', latestReplies: newest, externalContent: true };
     });
   }
 }
@@ -240,6 +257,38 @@ async function checkAccessNotice(page: import('playwright-core').Page) {
     throw new PlatformError('平台要求人工验证。请在专用登录窗口处理，完成后关闭窗口再试。', 'auth');
   if (/登录后查看|请先登录|登录后继续|登录后搜索/.test(visible))
     throw new PlatformError('平台要求登录。请在配置页打开该平台的专用登录窗口。', 'auth');
+}
+
+function tiebaReadResponse(page: Page, path: string, matches: (data: Record<string, unknown>) => boolean) {
+  return page.waitForResponse(response => {
+    const url = new URL(response.url());
+    if (url.origin !== POST_ORIGINS.tieba || url.pathname !== path || !response.ok()) return false;
+    try { return matches(response.request().postDataJSON() ?? {}); } catch { return false; }
+  }, { timeout: 9500 }).catch(() => undefined);
+}
+
+async function tiebaPayload(response: Response | undefined) {
+  const raw = await response?.json().catch(() => undefined);
+  return raw?.data ?? raw;
+}
+
+async function newestTiebaComments(page: Page, oid: string) {
+  const newest = page.locator('.sub-tab-item').filter({ hasText: /^\s*倒序\s*$/, visible: true });
+  await newest.first().waitFor({ state: 'visible', timeout: 3000 }).catch(() => {});
+  if (await newest.count() !== 1) return false;
+  const active = newest.and(page.locator('.sub-tab-item-active'));
+  if (await active.count() === 1) return true;
+  const pending = tiebaReadResponse(page, '/c/f/pb/page_pc', data => String(data.kz) === oid && String(data.r) === '1');
+  await newest.click({ timeout: 2800 });
+  const data = await tiebaPayload(await pending);
+  if (Number(data?.error_code) !== 0 || String(data?.thread?.id) !== oid || !Array.isArray(data.post_list)) return false;
+  if (!data.post_list.length) return await active.count() === 1;
+  const latestId = String(data.post_list[0]?.id);
+  if (!/^\d+$/.test(latestId)) return false;
+  const rendered = await page.waitForFunction(id =>
+    document.querySelector('.pb-comment-item[data-id]')?.getAttribute('data-id') === id,
+  latestId, { timeout: 3000 }).then(() => true, () => false);
+  return rendered && await active.count() === 1;
 }
 
 const POST_UI = {
@@ -466,25 +515,118 @@ export class PublicPostAdapter implements SocialPlatform {
     return [...results.values()].slice(0, limit);
   }
 
+  private async tiebaRows(page: Page, mode: 'search' | 'forum' | 'feed') {
+    const selector = mode === 'search'
+      ? '.thread-content-box:has(.search-action-bar), .s_post'
+      : mode === 'forum'
+        ? '.frs-feed-list a.thread-content-link, #thread_list .threadlist_title a.j_th_tit'
+        : 'a.thread-content-link, #thread_list .threadlist_title a.j_th_tit';
+    const rows = page.locator(selector).filter({ visible: true });
+    await rows.first().waitFor({ timeout: 7000 }).catch(() => {});
+    const entries = await rows.evaluateAll(nodes => nodes.slice(0, 60).map(row => {
+      const anchor = row instanceof HTMLAnchorElement
+        ? row : row.querySelector<HTMLAnchorElement>('.search-action-bar a.action-link-bg[href], .p_title a.bluelink[href]');
+      const title = row.querySelector('.title-wrap, .thread-title, .p_title a.bluelink')?.textContent ||
+        (row instanceof HTMLAnchorElement && row.matches('.j_th_tit') ? row.textContent : '');
+      return {
+        href: anchor?.href,
+        title: title?.trim().slice(0, 160),
+        snippet: row.querySelector('.abstract-wrap, .p_content')?.textContent?.trim().slice(0, 200),
+        forum: row.querySelector('.forum-name-text')?.textContent?.trim().slice(0, 60),
+        replies: row.closest('.thread-card, .j_thread_list')?.querySelector('.comment-link-zone, .threadlist_rep_num')?.textContent?.trim(),
+      };
+    }));
+    const ids = new Set<string>();
+    const items = entries.flatMap(row => {
+      if (!row.href || !row.title) return [];
+      try {
+        const route = this.paths.remember(row.href);
+        if (ids.has(route.id)) return [];
+        ids.add(route.id);
+        return [{ ...route, aid: route.id, title: row.title, snippet: row.snippet, forum: row.forum,
+          replies: /^\d+$/.test(row.replies ?? '') ? Number(row.replies) : undefined }];
+      } catch { return []; }
+    });
+    if (!items.length) await checkAccessNotice(page);
+    return items;
+  }
+
   async search(query: string, page: number, signal?: AbortSignal) {
     if (page !== 1) throw new PlatformError('当前平台支持读取官网搜索首屏。');
     const search = new URL(this.id === 'tieba' ? '/f/search/res' : '/search_result', this.origin);
-    search.searchParams.set(this.id === 'tieba' ? 'qw' : 'keyword', query);
-    const items = await this.run(search, signal, tab => this.listed(tab, 8));
-    return { items, externalContent: true, detail: items.length ? '官网搜索首屏。' : '官网当前未展示可识别结果。' };
+    if (this.id !== 'tieba') {
+      search.searchParams.set('keyword', query);
+      const items = await this.run(search, signal, tab => this.listed(tab, 8));
+      return { items, externalContent: true, detail: items.length ? '官网搜索首屏。' : '官网当前未展示可识别结果。' };
+    }
+    search.searchParams.set('ie', 'utf-8');
+    search.searchParams.set('qw', query);
+    const items = await this.run(search, signal, async tab => {
+      if (new URL(tab.url()).searchParams.get('qw') !== query)
+        throw new PlatformError('贴吧跳转到了不同的搜索词。', 'network');
+      const rows = await this.tiebaRows(tab, 'search');
+      const clean = (value: string) => value.normalize('NFKC').toLowerCase().replace(/[\s\p{P}\p{S}]/gu, '');
+      const phrase = clean(query);
+      const terms = query.split(/\s+/).map(clean).filter(Boolean);
+      const score = (row: typeof rows[number]) => {
+        const title = clean(row.title);
+        const evidence = title + clean(row.snippet ?? '') + clean(row.forum ?? '');
+        return (phrase && title.includes(phrase) ? 4 : 0) +
+          (phrase && evidence.includes(phrase) ? 2 : 0) +
+          (terms.length > 1 && terms.every(term => evidence.includes(term)) ? 1 : 0);
+      };
+      return rows.map(row => ({ row, score: score(row) }))
+        .filter(candidate => candidate.score > 0)
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 8).map(candidate => candidate.row);
+    });
+    return { items, externalContent: true, detail: items.length ? '贴吧搜索首屏，仅保留标题、摘要或吧名与检索词相符的结果。' : '贴吧搜索首屏没有可核对的相关帖子，可换一个更短的关键词。' };
   }
 
-  async nextVideo(seen: string[], signal?: AbortSignal) {
-    return this.run(new URL(this.ui.home, this.origin), signal, async page => {
-      const unseen = (await this.listed(page, 40)).filter(item => !seen.includes(item.id));
-      if (!unseen.length) {
+  private async withLatestForum<T>(input: string, signal: AbortSignal | undefined,
+    work: (page: Page, forum: string, items: Awaited<ReturnType<PublicPostAdapter['tiebaRows']>>) => Promise<T>) {
+    if (this.id !== 'tieba') throw new PlatformError('指定吧名仅适用于百度贴吧。');
+    const { name, url } = tiebaForumUrl(input);
+    url.searchParams.set('tab', '503');
+    return this.browser.withPublicPage('tieba', defaultSignal(signal), async page => {
+      const latest = tiebaReadResponse(page, '/c/f/frs/page_pc', data => String(data.tab_id) === '503' &&
+        typeof data.kw === 'string' && (data.kw === name || decodeURIComponent(data.kw) === name));
+      const opened = await page.goto(url.href, { waitUntil: 'domcontentloaded', timeout: 16000 });
+      await verifyPublicPage(page, opened?.status(), url);
+      const heading = await page.locator('.frs-search-tag-wraper .forum-name, .card_title_fname')
+        .filter({ visible: true }).first().textContent({ timeout: 7000 }).catch(() => '');
+      if (new URL(page.url()).searchParams.get('kw') !== name ||
+          ![name, name + '吧'].includes((heading ?? '').trim()))
+        throw new PlatformError('官网未显示「' + name + '」的吧首页。', 'network');
+      const active = page.locator('.frs-bar .tab-item.active').filter({ hasText: /^\s*最新\s*$/, visible: true });
+      const selected = await active.first().waitFor({ timeout: 5000 }).then(() => true, () => false);
+      const data = await tiebaPayload(await latest);
+      if (!selected || Number(data?.error_code) !== 0)
+        throw new PlatformError('官网「最新」列表暂未加载。', 'network');
+      // The virtual list displays a different slice from the IDs returned for the next batch.
+      return work(page, name, await this.tiebaRows(page, 'forum'));
+    }, { media: true });
+  }
+
+  async latestForum(input: string, signal?: AbortSignal) {
+    return this.withLatestForum(input, signal, async (_page, forum, items) => ({
+      forum: forum + '吧', items: items.slice(0, 8), externalContent: true,
+    }));
+  }
+
+  async nextVideo(seen: string[], signal?: AbortSignal, forum?: string) {
+    const readNext = async (page: Page, latest?: Awaited<ReturnType<PublicPostAdapter['tiebaRows']>>) => {
+      const list = (limit: number) => this.id === 'tieba' ? this.tiebaRows(page, 'feed') : this.listed(page, limit);
+      const unseen = (latest ?? await list(40)).filter(item => !seen.includes(item.id));
+      if (latest) unseen.sort((a, b) => Number('replies' in b && Boolean(b.replies)) - Number('replies' in a && Boolean(a.replies)));
+      if (!latest && !unseen.length) {
         const count = await page.locator(this.ui.links).count();
         await page.mouse.wheel(0, 900);
         await page.waitForFunction(({ selector, count }) => document.querySelectorAll(selector).length > count,
           { selector: this.ui.links, count }, { timeout: 3000 }).catch(() => {});
-        unseen.push(...(await this.listed(page, 80)).filter(item => !seen.includes(item.id)));
+        unseen.push(...(await list(80)).filter(item => !seen.includes(item.id)));
       }
-      if (!unseen.length) throw new PlatformError('当前推荐页没有可读取的新作品，可尝试按兴趣搜索。');
+      if (!unseen.length) throw new PlatformError(latest ? '这个吧的最新列表没有本轮可继续读取的帖子。' : '当前推荐页没有可读取的新作品，可尝试按兴趣搜索。');
       let failure: unknown;
       for (const candidate of unseen.slice(0, 3)) {
         try {
@@ -499,12 +641,15 @@ export class PublicPostAdapter implements SocialPlatform {
         }
       }
       throw failure instanceof Error ? failure : new PlatformError('当前推荐没有可读取的内容。');
-    }, { media: true });
+    };
+    return forum === undefined
+      ? this.run(new URL(this.ui.home, this.origin), signal, page => readNext(page), { media: true })
+      : this.withLatestForum(forum, signal, (page, _name, items) => readNext(page, items));
   }
 
-  readOriginal(input: string, signal: AbortSignal) {
+  readOriginal(input: string, signal: AbortSignal, latestReplies = false) {
     const { id } = this.paths.remember(input);
-    return this.browser.read(this.id, this.paths.get(id).href, signal);
+    return this.browser.read(this.id, this.paths.get(id).href, signal, latestReplies);
   }
 
   async resolveCreator(input: string, signal?: AbortSignal): Promise<Account> {
@@ -765,17 +910,18 @@ export class PublicPostAdapter implements SocialPlatform {
     return { items, nextCursor: known.length > start + 6 ? batch.at(-1) : undefined };
   }
 
-  async comments(value: CommentTarget, index: number, signal?: AbortSignal, cursor?: string) {
+  async comments(value: CommentTarget, index: number, signal?: AbortSignal, cursor?: string, latestReplies = false) {
     const target = this.normalizeTarget(value);
     if (index !== 1 && !(this.id === 'xiaohongshu' && target.root === '0' && cursor))
       throw new PlatformError('请使用上一页提供的评论续读位置。');
     return this.run(this.paths.get(target.oid), signal, async page => {
       await page.locator(this.ui.comments).first().waitFor({ timeout: 5000 }).catch(() => {});
+      const newest = latestReplies && this.id === 'tieba' && target.root === '0' && await newestTiebaComments(page, target.oid);
       const result = this.id === 'xiaohongshu'
         ? await this.xiaohongshuCommentPage(page, target, cursor, signal)
         : { items: (await this.rows(page, target.oid)).filter(row => target.root === '0' || row.target.root === target.root) };
       if (!result.items.length) await checkAccessNotice(page);
-      return { ...result, detail: '只返回官网当前页面中能核实楼层编号的评论。', externalContent: true };
+      return { ...result, detail: newest ? '按官网倒序读取最新的可核对楼层。' : '只返回官网当前页面中能核实楼层编号的评论。', externalContent: true };
     });
   }
 
@@ -1082,6 +1228,13 @@ export class PublicPostAdapter implements SocialPlatform {
             await checkAccessNotice(page);
             throw new PlatformError('一级评论框没有展开或未显示发送按钮，未提交。', 'rejected');
           }
+        }
+        if (this.id === 'tieba') {
+          // The inline editor mounts asynchronously after the verified floor's reply button is clicked.
+          await Promise.all([
+            composer.first().waitFor({ state: 'visible', timeout: 4000 }).catch(() => {}),
+            send.first().waitFor({ state: 'visible', timeout: 4000 }).catch(() => {}),
+          ]);
         }
         if (await composer.count() !== 1 || await send.count() !== 1)
           throw new PlatformError('官网回复编辑框或发送按钮无法唯一核实；未提交。', 'rejected');

@@ -1,4 +1,4 @@
-import { POST_PLATFORMS, profileId } from './public-post-policy.ts';
+import { POST_PLATFORMS, profileId, tiebaForumNames } from './public-post-policy.ts';
 import { parseGroupList } from './group-policy.ts';
 import { parseFocusAccount } from './focus.ts';
 import { coerceGroupValues, setByPath } from 'cortico/core/config-schema.ts';
@@ -34,6 +34,8 @@ export function settingsPatch(input: unknown): Partial<SocialMediaConfigSection>
       raw[field] = profile.url.href;
     }
   }
+  const forums = raw['worlds.socialmedia.platforms.tieba.roaming.forums'];
+  if (typeof forums === 'string') tiebaForumNames(forums);
   const groups = raw['worlds.socialmedia.platforms.douyin.chat.groups'];
   if (typeof groups === 'string') parseGroupList(groups);
   const checked = coerceGroupValues(SOCIALMEDIA_CONFIG_GROUP, raw);

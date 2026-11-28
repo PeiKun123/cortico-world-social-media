@@ -37,6 +37,7 @@ export interface SocialPlatformConfig {
   };
 }
 export interface RoamingConfig {
+  forums?: string;
   enabled: boolean;
   mode?: 'bounded' | 'free';
   maxDailySessions: number;
@@ -842,6 +843,11 @@ for (const id of POST_PLATFORMS) {
   Object.assign(SOCIALMEDIA_CONFIG_GROUP.schema.properties, {
     [key + 'enabled']: { type: 'boolean', title: '启用' + label, 'x-hot': true },
     [key + 'posting.enabled']: { type: 'boolean', title: '允许' + label + '公开发言', 'x-hot': true },
+    ...(id === 'tieba' ? {
+      [key + 'roaming.forums']: {
+        type: 'string', title: '想逛的吧', description: '直接填吧名，用逗号隔开，例如「弱智吧，抗压背锅吧」。每轮换一个；留空逛推荐。', 'x-hot': true,
+      },
+    } : {}),
     ...(id === 'xiaohongshu' ? {
       [key + 'focus.autoReplyIntervalMinutes']: {
         type: 'integer', title: '小红书新评论检查间隔（分钟）', minimum: 2, maximum: 60,

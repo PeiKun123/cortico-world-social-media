@@ -36,6 +36,20 @@ function setup(now = Date.parse('2026-10-23T03:00:00+09:00')) {
   };
 }
 describe('bounded autonomous reading', () => {
+  it('rotates saved Tieba forums and falls back to recommendations when the list is cleared', () => {
+    const x = setup();
+    x.cfg.platforms.tieba.enabled = true;
+    const limits = x.cfg.platforms.tieba.roaming!;
+    Object.assign(limits, { enabled: true, forums: '弱智吧，抗压背锅吧、弱智吧', minIntervalMinutes: 0, maxDailySessions: 8 });
+    for (const name of ['弱智', '抗压背锅', '弱智']) {
+      const round = x.roam.offer('tieba')!;
+      expect(round.forum).toBe(name);
+      x.roam.finish(round.id, '');
+    }
+    limits.forums = '';
+    expect(x.roam.offer('tieba')!.forum).toBeUndefined();
+  });
+
   it('persists opportunities and enforces cooldown and daily cap across restarts', () => {
     const x = setup();
     const a = x.roam.offer()!;

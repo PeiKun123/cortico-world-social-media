@@ -2,7 +2,7 @@ import { CHAT_SCENES } from '../expression-scenes.ts';
 import type { WebUiPanelContext } from 'cortico/web/shared/client-panel.ts';
 import type { ExpressionPractice, ExpressionSample } from '../expression.ts';
 import type { SocialPlatformConfig } from '../config.ts';
-import { PUBLIC_POST_NAMES, type PublicPostPlatform } from '../public-post-policy.ts';
+import { PUBLIC_POST_NAMES, tiebaForumNames, type PublicPostPlatform } from '../public-post-policy.ts';
 
 export type PublicPlatformSettings = Partial<Record<PublicPostPlatform, SocialPlatformConfig & { bound: boolean; loginOpen?: boolean; paused?: string; account?: { name: string }; focusStatus?: { binding?: { name: string }; check?: { error?: string }; reading?: { cachedWorks: number } } }>>;
 
@@ -315,25 +315,50 @@ export function expressionSettings(ctx: WebUiPanelContext, refreshPublic: () => 
     card.className = 'sm-config-section sm-platform-card sm-public-posts';
     card.dataset.platform = key;
     card.tabIndex = -1;
+    const readStatus = key === 'tieba' ? el('p') : result;
+    readStatus.setAttribute('role', 'status');
+    const article = el('article');
+    article.className = 'sm-tieba-preview';
+    article.hidden = true;
     let busy = false;
-    const run = async (message: string, fn: () => Promise<void>) => {
+    const run = async (message: string, fn: () => Promise<void>, feedback: HTMLElement = result) => {
       if (busy) return;
       if (!field.input.checked) {
-        result.textContent = '请先启用' + label + '。';
+        feedback.textContent = '请先启用' + label + '。';
         return;
       }
       busy = true;
-      result.textContent = message;
+      feedback.textContent = message;
       try { await fn(); }
-      catch (error) { result.textContent = error instanceof Error ? error.message : '操作失败。'; }
+      catch (error) { feedback.textContent = error instanceof Error ? error.message : '操作失败。'; }
       finally { busy = false; }
     };
     const readPost = () => run('正在读取原帖…', async () => {
       const address = url.value.trim();
       if (!address) throw Error('先粘贴完整原帖链接，或从搜索结果选一条。');
-      const post = await ctx.invoke<{ title: string; text: string; comments: string[]; url: string; detail: string }>('expressionReadPost', [key, address]);
-      result.textContent = [post.title, post.url, post.text, ...post.comments, post.detail].join('\n\n');
-    });
+      const post = await ctx.invoke<{ title: string; text: string; comments: string[]; url: string; detail: string; latestReplies?: boolean }>('expressionReadPost', [key, address]);
+      if (key !== 'tieba') {
+        result.textContent = [post.title, post.url, post.text, ...post.comments, post.detail].join('\n\n');
+        return;
+      }
+      const header = el('div');
+      header.append(el('h4', post.title));
+      if (/^https:\/\/tieba\.baidu\.com\/p\/\d+$/.test(post.url)) {
+        const link = el('a', '打开原帖 ↗');
+        link.href = post.url;
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        header.append(link);
+      }
+      const comments = el('ol');
+      comments.className = 'sm-tieba-comments';
+      for (const line of post.comments) comments.append(el('li', line));
+      article.replaceChildren(header, el('p', post.text), el('h5', post.latestReplies ? '最新评论' : '官网显示的评论'),
+        post.comments.length ? comments : el('p', '这页暂无可读评论。'));
+      article.hidden = false;
+      article.scrollIntoView({ block: 'nearest' });
+      readStatus.textContent = post.latestReplies ? '已按官网倒序读取。' : post.detail;
+    }, readStatus);
     const searchRow = el('div');
     searchRow.className = 'sm-public-search';
     const searchButton = action('搜索' + label, () => run('正在搜索…', async () => {
@@ -350,14 +375,53 @@ export function expressionSettings(ctx: WebUiPanelContext, refreshPublic: () => 
         }));
         matches.append(row);
       }
-      result.textContent = data.items.length ? '找到 ' + data.items.length + ' 条。点标题可试读。' : data.detail;
-    }));
+      readStatus.textContent = data.items.length ? '找到 ' + data.items.length + ' 条。点标题读取。' : data.detail;
+    }, readStatus));
     query.addEventListener('keydown', event => {
       if (event.key !== 'Enter' || event.isComposing) return;
       event.preventDefault();
       searchButton.click();
     }, { signal: ctx.signal });
     searchRow.append(query, searchButton);
+    const forumChips = el('div');
+    forumChips.className = 'sm-tieba-forum-chips';
+    const forumInput = el('input');
+    forumInput.type = 'text';
+    forumInput.maxLength = 300;
+    forumInput.setAttribute('aria-label', '要进的吧');
+    forumInput.placeholder = '输入吧名，例如弱智吧';
+    const forumList = el('ul');
+    forumList.className = 'sm-public-matches sm-tieba-latest';
+    forumList.setAttribute('aria-label', '最新帖子');
+    const openForum = (name: string) => run('正在读取吧里的最新帖子…', async () => {
+      if (!name) throw Error('先填一个吧名。');
+      forumInput.value = name;
+      forumList.replaceChildren();
+      article.hidden = true;
+      const data = await ctx.invoke<{ forum: string; items: Array<{ title: string; url: string; replies?: number }> }>(
+        'expressionTiebaLatest', ['tieba', name]);
+      for (const item of data.items) {
+        const row = el('li');
+        const button = action(item.title, async () => {
+          url.value = item.url;
+          await readPost();
+        });
+        if (item.replies !== undefined) button.append(el('small', item.replies + ' 条回复'));
+        row.append(button);
+        forumList.append(row);
+      }
+      readStatus.textContent = data.forum + (data.items.length ? ' · 最新 ' + data.items.length + ' 帖，点标题看回复。' : ' · 暂无可读取的新帖。');
+    }, readStatus);
+    const forumForm = el('form');
+    forumForm.className = 'sm-public-search';
+    const go = el('button', '进吧');
+    go.type = 'submit';
+    forumForm.append(forumInput, go);
+    forumForm.addEventListener('submit', event => {
+      event.preventDefault();
+      void openForum(forumInput.value.trim());
+    }, { signal: ctx.signal });
+    let shownForums: string | undefined;
     const focusSection = el('details');
     focusSection.className = 'sm-subsection sm-platform-focus';
     const readSection = el('details');
@@ -414,16 +478,33 @@ export function expressionSettings(ctx: WebUiPanelContext, refreshPublic: () => 
         ? '按官网能加载的评论分批判断。有话才回，带图先看图。主人评论区独立检查，闲逛关闭也能回复；还受模型当前任务和平台发送间隔影响。开启新发评论后，每条主人作品最多一条独立评论。'
         : '主要用于看帖和收集语料。公开回复按原楼层核对并计入额度。'),
     );
-    readSection.append(el('summary', '搜索与读取检查'),
-      el('p', '按话题搜索或粘贴原帖链接，检查读到的正文和评论。'),
-      action('检查推荐流', () => run('正在试读推荐帖…', async () => {
-        const tested = await ctx.invoke<{ title: string; url: string; detail: string }>('expressionPublicFeedCheck', [key]);
-        result.textContent = [tested.title, tested.url, tested.detail].join('\n');
-      })),
-      searchRow, matches, url, action('读取' + label + '公开帖', readPost));
+    const readLink = el('div');
+    readLink.className = 'sm-public-search';
+    readLink.append(url, action('读取原帖', readPost));
+    const recommendation = action('检查推荐流', () => run('正在试读推荐帖…', async () => {
+      const tested = await ctx.invoke<{ title: string; url: string; detail: string }>('expressionPublicFeedCheck', [key]);
+      readStatus.textContent = [tested.title, tested.url, tested.detail].join('\n');
+    }, readStatus));
+    if (key === 'tieba') {
+      const more = el('details');
+      more.className = 'sm-tieba-more';
+      more.append(el('summary', '按关键词或链接找帖'), searchRow, matches, readLink);
+      readSection.open = true;
+      readSection.append(el('summary', '进吧看帖'), forumChips, forumForm, readStatus, forumList, article, more);
+    } else {
+      readSection.append(el('summary', '搜索与读取检查'),
+        el('p', '按话题搜索或粘贴原帖链接，检查读到的正文和评论。'), recommendation, searchRow, matches, readLink);
+    }
     return [key, { card, render(state: PublicPlatformSettings[PublicPostPlatform], ownerCount?: number | null) {
       if (!state) return;
       field.input.checked = state.enabled;
+      if (key === 'tieba' && shownForums !== (state.roaming?.forums ?? '')) {
+        shownForums = state.roaming?.forums ?? '';
+        let forums: string[] = [];
+        try { forums = tiebaForumNames(shownForums); } catch { /* malformed local settings */ }
+        forumChips.replaceChildren(...forums.map(name => action(name + '吧', () => openForum(name + '吧'))));
+        forumChips.hidden = !forums.length;
+      }
       closeLogin.hidden = !state.loginOpen;
       focus.input.checked = state.focus?.enabled === true;
       posting.input.checked = state.posting.enabled;

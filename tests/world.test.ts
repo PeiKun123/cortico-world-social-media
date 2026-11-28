@@ -431,6 +431,71 @@ it('routes enabled Douyin reads through its own adapter, preserving video and co
   await expect(x.world.webUi().invoke!('desk', 'douyinLogin', [])).rejects.toThrow('配置页');
 });
 
+it('reports the live public reply setting at offer, begin and comment read', async () => {
+  const { world, cfg } = setup();
+  const live = world as any;
+  const platform = cfg.platforms.tieba;
+  cfg.enabled = true;
+  cfg.roaming.enabled = true;
+  platform.enabled = true;
+  platform.roaming!.idleMinutes = 1;
+  platform.roaming!.forums = '弱智吧，抗压背锅吧';
+  platform.posting.enabled = true;
+  platform.posting.maxDailyComments = 5;
+  cfg.publicAccounts = { tieba: 'tieba-fixture' };
+  const adapter = live.service.platform('tieba');
+  vi.spyOn(adapter, 'account').mockResolvedValue({ id: 'tieba-fixture', name: '测试账号' });
+  await live.service.connect('tieba');
+  const pushEvent = vi.fn();
+  live.host = { store: { range: () => [] }, pushEvent };
+  live.idleSince = Date.now() - 120000;
+  const roam = world.tools().find(t => t.name === 'socialmedia_roam')!;
+  const comments = world.tools().find(t => t.name === 'socialmedia_comments')!;
+  const decode = (result: string | { text?: string }) =>
+    JSON.parse(typeof result === 'string' ? result : result.text!);
+
+  try {
+    await live.maybeOfferRoam();
+    const event = pushEvent.mock.calls[0][0];
+    expect(event.text).toContain('"publicReply":{"enabled":true,"dailyRemaining":5}');
+    expect(event.text).toContain('从该吧「最新」页选一帖并读实际评论');
+    expect(event.text).toContain('"forum":"弱智"');
+    const id = event.meta.roamId;
+    platform.posting.enabled = false;
+    expect(decode(await roam.handler({ action: 'begin', id }, {} as never)))
+      .toMatchObject({ publicReply: { enabled: false, dailyRemaining: 5 } });
+
+    platform.posting.enabled = true;
+    platform.posting.maxDailyComments = 0;
+    expect(decode(await roam.handler({ action: 'status' }, {} as never)))
+      .toMatchObject({ active: { id, publicReply: { enabled: true, dailyRemaining: 0 } } });
+
+    const read = vi.spyOn(adapter, 'comments').mockResolvedValue({ comments: [], page: 1, limited: false });
+    const target = { oid: '104', type: 4, root: '0', parent: '0' };
+    live.service.roaming.recordVideo(id, { id: '104', aid: '104', title: '吧内正帖', url: 'https://tieba.baidu.com/p/104' });
+    platform.posting.maxDailyComments = 3;
+    expect(decode(await comments.handler({ platform: 'tieba', roamId: id, target }, {} as never)))
+      .toMatchObject({ publicReply: { enabled: true, dailyRemaining: 3 } });
+    expect(read).toHaveBeenLastCalledWith(target, 1, expect.any(AbortSignal), undefined, true);
+    expect(decode(await comments.handler({ platform: 'tieba', target }, {} as never)).publicReply)
+      .toBeUndefined();
+  } finally {
+    await world.stop();
+  }
+});
+
+it('routes a named Tieba forum through the normal feed tool', async () => {
+  const x = setup();
+  x.cfg.platforms.tieba.enabled = true;
+  const read = vi.spyOn((x.world as any).publicAdapters.tieba, 'nextVideo').mockResolvedValue({
+    id: '104', aid: '104', url: 'https://tieba.baidu.com/p/104', title: '吧内正帖',
+  });
+  const feed = x.world.tools().find(t => t.name === 'socialmedia_feed')!;
+  const result = await feed.handler({ platform: 'tieba', forum: '弱智吧' }, {} as never);
+  expect(JSON.parse(typeof result === 'string' ? result : result.text)).toMatchObject({ source: '指定吧首页', video: { title: '吧内正帖' } });
+  expect(read).toHaveBeenCalledWith([], expect.any(AbortSignal), '弱智吧');
+});
+
 it('exposes next-video browsing and applies roaming limits before touching the browser', async () => {
   const x = setup();
   x.cfg.platforms.douyin.enabled = true;

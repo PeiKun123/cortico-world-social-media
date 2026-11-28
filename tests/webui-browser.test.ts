@@ -56,12 +56,12 @@ describe.skipIf(!findBrowserExecutable())('timeline in a real browser', () => {
       if (path === '/webui.js')
         return route.fulfill({
           contentType: 'application/javascript',
-          body: readFileSync(new URL('../dist/webui-surf-owner-quota.js', import.meta.url), 'utf8'),
+          body: readFileSync(new URL('../dist/webui-surf-tieba-latest.js', import.meta.url), 'utf8'),
         });
       if (path === '/style.css')
         return route.fulfill({
           contentType: 'text/css',
-          body: readFileSync(new URL('../dist/webui-surf-owner-quota.css', import.meta.url), 'utf8'),
+          body: readFileSync(new URL('../dist/webui-surf-tieba-latest.css', import.meta.url), 'utf8'),
         });
       return route.fulfill({
         contentType: 'text/html',
@@ -70,7 +70,7 @@ describe.skipIf(!findBrowserExecutable())('timeline in a real browser', () => {
           JSON.stringify(data) +
           ';window.calls=[];window.refreshers=[];' +
           (settings ? 'mountSettings' : 'mount') +
-          '({root:document.getElementById("root"),signal:new AbortController().signal,invoke:async(method,args)=>{window.calls.push(method);if(method==="settings")window.savedSettings=args[0];if(method==="expressionList"){const rows=window.testState.practiceRows??[];const p=args[1]??1;return{settings:window.testState.config.experiments??{},samples:[],practicePage:p,practicePages:Math.max(1,Math.ceil(rows.length/3)),practiceTotal:rows.length,practices:rows.slice((p-1)*3,p*3),handbook:[]};}if(method==="clearMediaCache")return{removed:1};if(method==="history")return{items:[{...window.testState.outbox[0],id:"archived-old",text:"归档里的原话",target:{oid:"11",type:1,root:"0",parent:"0"}}]};return structuredClone(window.testState)},setConfig:async()=>"",interval:fn=>{window.refreshers.push(fn);return{dispose(){}}}});</script></body></html>',
+          '({root:document.getElementById("root"),signal:new AbortController().signal,invoke:async(method,args)=>{window.calls.push(method);if(method==="settings")window.savedSettings=args[0];if(method==="expressionList"){const rows=window.testState.practiceRows??[];const p=args[1]??1;return{settings:window.testState.config.experiments??{},samples:[],practicePage:p,practicePages:Math.max(1,Math.ceil(rows.length/3)),practiceTotal:rows.length,practices:rows.slice((p-1)*3,p*3),handbook:[]};}if(method==="expressionTiebaLatest")return{forum:args[1],items:[{title:"吧内正帖",url:"https://tieba.baidu.com/p/104",replies:3}]};if(method==="expressionReadPost")return{title:"吧内正帖",url:args[1],text:"正帖正文",comments:["最新一条"],latestReplies:true,detail:""};if(method==="clearMediaCache")return{removed:1};if(method==="history")return{items:[{...window.testState.outbox[0],id:"archived-old",text:"归档里的原话",target:{oid:"11",type:1,root:"0",parent:"0"}}]};return structuredClone(window.testState)},setConfig:async()=>"",interval:fn=>{window.refreshers.push(fn);return{dispose(){}}}});</script></body></html>',
       });
     });
     await page.goto('http://socialmedia.test/');
@@ -101,6 +101,25 @@ describe.skipIf(!findBrowserExecutable())('timeline in a real browser', () => {
       await clock.filter({ hasText: '忙碌中' }).waitFor();
     } finally { await page.close(); }
   });
+  it('opens a saved Tieba forum and previews a latest reply through the settings page', async () => {
+    const page = await fixture(760, true);
+    try {
+      await page.evaluate(() => {
+        const w = window as any;
+        w.testState.publicPlatforms = { tieba: { enabled: true, bound: true, posting: { enabled: false },
+          roaming: { forums: '弱智吧，抗压背锅吧' } } };
+        w.refreshers.forEach((fn: () => void) => fn());
+      });
+      await page.getByRole('tab', { name: '百度贴吧（实验）', exact: true }).click();
+      const panel = page.getByRole('tabpanel', { name: '百度贴吧（实验）' });
+      await panel.getByRole('button', { name: '弱智吧', exact: true }).click();
+      await panel.getByRole('button', { name: /吧内正帖/ }).click();
+      await panel.getByText('最新一条').waitFor();
+      expect(await panel.getByRole('heading', { name: '最新评论' }).isVisible()).toBe(true);
+      expect(await panel.getByRole('link', { name: '打开原帖 ↗' }).getAttribute('href')).toBe('https://tieba.baidu.com/p/104');
+      expect(await panel.getByRole('textbox', { name: '百度贴吧搜索话题' }).isVisible()).toBe(false);
+    } finally { await page.close(); }
+  });
   it('shows the renamed settings and a visible experimental entry below platform settings', async () => {
     const page = await fixture(1050, true);
     try {
@@ -108,6 +127,11 @@ describe.skipIf(!findBrowserExecutable())('timeline in a real browser', () => {
       const experiments = page.locator('.sm-experiments');
       const entry = experiments.getByText('实验功能', { exact: true });
       expect(await title.isVisible()).toBe(true);
+      await page.getByRole('tab', { name: '百度贴吧（实验）', exact: true }).click();
+      await page.getByRole('button', { name: '活跃度', exact: true }).click();
+      expect(await page.getByRole('textbox', { name: '想逛的吧' }).isVisible()).toBe(true);
+      await page.getByRole('textbox', { name: '想逛的吧' }).fill('弱智吧，抗压背锅吧');
+      await page.getByRole('button', { name: '保存百度贴吧设置' }).click();
       expect(await page.getByRole('button', { name: '实验功能 · 小红书' }).count()).toBe(0);
       expect((await entry.boundingBox())!.y).toBeGreaterThan((await page.locator('.sm-settings').boundingBox())!.y);
       for (const label of ['小红书', '百度贴吧']) {

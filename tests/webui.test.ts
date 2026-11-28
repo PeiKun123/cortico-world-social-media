@@ -821,13 +821,13 @@ it('keeps Xiaohongshu read errors visible inside its own section instead of leav
     },
   } as unknown as WebUiPanelContext);
   await new Promise((r) => setTimeout(r, 0));
-  root.querySelector<HTMLInputElement>('[aria-label="小红书原帖链接"]')!.value =
-    'https://www.xiaohongshu.com/explore/5d7fcb4500000001000190be';
-  [...root.querySelectorAll('button')].find((b) => b.textContent === '读取小红书公开帖')!.click();
-  await new Promise((r) => setTimeout(r, 0));
   const section = [...root.querySelectorAll('section')].find((s) =>
     s.querySelector('h3')?.textContent?.startsWith('小红书 ·'),
   )!;
+  section.querySelector<HTMLInputElement>('[aria-label="小红书原帖链接"]')!.value =
+    'https://www.xiaohongshu.com/explore/5d7fcb4500000001000190be';
+  [...section.querySelectorAll('button')].find((b) => b.textContent === '读取原帖')!.click();
+  await new Promise((r) => setTimeout(r, 0));
   expect(section.textContent).toContain('作品暂不可读');
   expect(section.textContent).not.toContain('正在读取原帖');
   controller.abort();

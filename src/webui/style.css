@@ -1456,3 +1456,16 @@
 .sm-public-matches { display: grid; gap: 4px; list-style: none; margin: 8px 0; padding: 0; }
 .sm-public-matches:empty { display: none; }
 .sm-public-matches button { text-align: start; overflow-wrap: anywhere; max-width: 100%; }
+.sm-tieba-forum-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.sm-tieba-forum-chips[hidden], .sm-tieba-preview[hidden] { display: none; }
+.socialmedia-desk .sm-tieba-forum-chips button { color: var(--sm-platform-accent, inherit); }
+.socialmedia-desk .sm-tieba-latest button { display: flex; flex-wrap: wrap; gap: 6px 14px; width: 100%; justify-content: space-between; }
+.sm-tieba-latest small { opacity: .75; }
+.sm-tieba-preview { margin: 12px 0; padding: 14px; border-radius: 12px; background: color-mix(in srgb, currentColor 5%, transparent); }
+.sm-tieba-preview > div { display: flex; align-items: baseline; justify-content: space-between; gap: 8px 16px; flex-wrap: wrap; }
+.sm-tieba-preview h4, .sm-tieba-preview h5 { margin: 0; }
+.sm-tieba-preview p, .sm-tieba-preview li { white-space: pre-wrap; overflow-wrap: anywhere; }
+.sm-tieba-comments { padding-inline-start: 24px; margin: 8px 0 0; }
+.sm-tieba-comments li + li { margin-top: 8px; }
+.sm-tieba-more { margin-top: 14px; }
+.sm-tieba-more > summary { cursor: pointer; }

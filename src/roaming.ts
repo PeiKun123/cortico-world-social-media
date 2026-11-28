@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { ROAMING_PLATFORMS, roamingConfig, type SocialMediaConfigSection } from './config.ts';
+import { tiebaForumNames } from './public-post-policy.ts';
 import { isOwnerCommentRecord } from './platform.ts';
 import type { SocialStore } from './store.ts';
-export type ReadingSource = '兴趣推荐' | '主动搜索' | '相邻主题';
+export type ReadingSource = '兴趣推荐' | '主动搜索' | '相邻主题' | '指定吧首页';
 export function workFingerprint(title: string) {
   return title.normalize('NFKC').toLowerCase().replace(/#[^#\s]+/gu, '').replace(/[\p{P}\p{S}\s]/gu, '');
 }
@@ -11,6 +12,7 @@ export interface RoamSession {
   createdAt: string;
   expiresAt?: string;
   platform?: string;
+  forum?: string;
   yieldRequestedAt?: string;
   yieldReason?: string;
   status: 'offered' | 'active' | 'finished' | 'skipped' | 'expired';
@@ -141,9 +143,13 @@ export class Roaming {
     const platform = candidates[0];
     if (!platform) return;
     const c = status.platforms[platform].limits;
+    const forums = platform === 'tieba' ? tiebaForumNames(c.forums ?? '') : [];
+    const lastForum = forums.length ? all.slice().reverse().find(round => round.platform === 'tieba' && round.forum)?.forum : undefined;
+    const nextForum = forums.length ? forums[((lastForum ? forums.indexOf(lastForum) : -1) + 1) % forums.length] : undefined;
     const r: RoamSession = {
       id: randomUUID(),
       platform,
+      ...(nextForum ? { forum: nextForum } : {}),
       createdAt: new Date(this.now()).toISOString(),
       expiresAt: new Date(this.now() + c.maxSessionMinutes * 60000).toISOString(),
       status: 'offered',

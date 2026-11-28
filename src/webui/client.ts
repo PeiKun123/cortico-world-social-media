@@ -1254,7 +1254,7 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
             ? groupSection
             : groupAdvanced
           : roamPath
-            ? ['enabled', 'idleMinutes', 'minIntervalMinutes'].includes(roamPath[2])
+            ? ['enabled', 'idleMinutes', 'minIntervalMinutes', 'forums'].includes(roamPath[2])
               ? roamCards.get(roamPath[1])!
               : roamFields.get(roamPath[1])!
             : path.startsWith('worlds.socialmedia.media.')
@@ -1316,6 +1316,7 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
       const field = el('input');
       field.type =
         prop.type === 'boolean' ? 'checkbox' : prop.type === 'integer' ? 'number' : 'text';
+      if (roamPath?.[2] === 'forums') field.placeholder = '弱智吧，抗压背锅吧';
       if (prop.minimum !== undefined) field.min = String(prop.minimum);
       if (prop.maximum !== undefined) field.max = String(prop.maximum);
       input = field;
@@ -1523,7 +1524,12 @@ export function mount(ctx: WebUiPanelContext, settingsMode = false) {
     const platformActivity = roamCards.get(id)!;
     const group = el('section', undefined, 'sm-activity-settings');
     platformActivity.before(group);
-    group.append(el('h3', '活跃安排'), platformActivity);
+    group.append(el('h3', '活跃安排'));
+    if (id === 'tieba') {
+      const forums = extraInputs.get('worlds.socialmedia.platforms.tieba.roaming.forums')?.closest('label');
+      if (forums) group.append(forums);
+    }
+    group.append(platformActivity);
     activityGroups.set(id, group);
   }
   const visualPanes = new Map<string, HTMLElement>();

@@ -172,6 +172,16 @@ export class SocialService {
       ...(platform === 'bilibili' && this.cfg.focus.enabled ? { boundOwnerNotificationPerPersonLimit: this.cfg.focus.outsideReplyLimit ?? MAX_REPLIES_PER_PERSON } : {}),
     };
   }
+  publicReplyStatus(platform: string | undefined) {
+    if (!platform) return undefined;
+    const config = this.cfg.platforms[platform];
+    if (!config) return undefined;
+    const usage = this.publishingUsage(platform, this.states.get(platform)?.account?.id);
+    return {
+      enabled: Boolean(this.cfg.enabled && config.enabled && config.posting.enabled),
+      dailyRemaining: usage.dailyUsed === null ? null : Math.max(0, usage.dailyLimit - usage.dailyUsed),
+    };
+  }
   connectionStatus() {
     return [...this.states.values()].map((s) => ({
       ...s,

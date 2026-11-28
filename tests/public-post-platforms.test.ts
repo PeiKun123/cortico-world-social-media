@@ -57,6 +57,53 @@ describe.skipIf(!findBrowserExecutable())('public post adapter on an offline Chr
   });
   afterAll(async () => { await browser?.close(); });
 
+  it('reads only real Tieba search results and verifies the selected forum latest list and comments', async () => {
+    const backend = new PublicPostBrowser('unused');
+    const noise = '<aside><a class="hot-thread" href="/p/101">娱乐热榜</a></aside>';
+    const card = (id: string, title: string, excerpt: string) => '<div class="thread-content-box">' +
+      '<div class="title-wrap">' + title + '</div><div class="abstract-wrap">' + excerpt + '</div>' +
+      '<div class="search-action-bar"><a class="action-link-bg" href="/p/' + id + '"></a></div></div>';
+    const visits: string[] = [];
+    vi.spyOn(backend, 'withPublicPage').mockImplementation(async (_platform, _signal, run) => {
+      const context = await browser.newContext();
+      try {
+        await context.route('**/*', route => {
+          const url = new URL(route.request().url());
+          if (url.origin !== POST_ORIGINS.tieba) return route.abort();
+          if (url.pathname === '/c/f/frs/page_pc' && route.request().postDataJSON()?.tab_id === '503')
+            return route.fulfill({ json: { error_code: 0, thread_id_list: ['107'] } });
+          if (url.pathname === '/c/f/pb/page_pc' && route.request().postDataJSON()?.r === '1')
+            return route.fulfill({ json: { error_code: 0, thread: { id: '104' }, post_list: [{ id: '202' }] } });
+          if (route.request().method() !== 'GET') return route.abort();
+          visits.push(url.pathname);
+          const body = url.pathname === '/f/search/res'
+            ? noise + (url.searchParams.get('qw') === '没结果' ? '' :
+              card('102', '入门闲聊', '讨论微缩模型') + card('103', '微缩模型制作', '田野微景观') + card('105', '无关主题', '没有相关讨论'))
+            : url.pathname === '/f' ? noise + '<div class="frs-search-tag-wraper"><b class="forum-name">弱智<span style="display:block">吧</span></b></div>' +
+              '<div class="frs-bar"><span class="tab-item active">最新</span></div>' +
+              '<aside><a class="thread-content-link" href="/p/106"><span class="thread-title">热门榜旧帖</span></a></aside>' +
+              '<div class="frs-feed-list"><a class="thread-content-link" href="/p/104"><span class="thread-title">吧内正帖</span></a></div>' +
+              '<script>fetch("/c/f/frs/page_pc",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({tab_id:"503",kw:"弱智"})})</script>'
+            : '<div class="image-text"><h1 class="pb-title">吧内正帖</h1><p class="pb-content-wrap" style="min-height: 1px"></p></div>' +
+              '<span class="sub-tab-item"> 倒序 </span><div class="pb-comment-item" data-id="201"><div class="comment-content"><div class="pb-rich-text">旧回复</div></div></div>' +
+              '<script>document.querySelector(".sub-tab-item").onclick=async e=>{const el=e.target;await fetch("/c/f/pb/page_pc",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({kz:"104",r:"1"})});el.classList.add("sub-tab-item-active");document.querySelector(".pb-comment-item").setAttribute("data-id","202");document.querySelector(".pb-rich-text").textContent="最新一条";}</script>';
+          return route.fulfill({ contentType: 'text/html; charset=utf-8', body });
+        });
+        return await run(await context.newPage());
+      } finally { await context.close(); }
+    });
+    const adapter = new PublicPostAdapter('tieba', backend);
+    const results = await adapter.search('微缩模型', 1);
+    expect(results.items.map(item => item.id)).toEqual(['103', '102']);
+    expect((await adapter.search('没结果', 1)).items).toEqual([]);
+    expect((await adapter.latestForum('弱智吧')).items.map(item => item.id)).toEqual(['104']);
+    await expect(adapter.nextVideo([], undefined, '弱智吧')).resolves.toMatchObject({ aid: '104', title: '吧内正帖' });
+    await expect(adapter.readOriginal(POST_ORIGINS.tieba + '/p/104', AbortSignal.timeout(6000), true))
+      .resolves.toMatchObject({ latestReplies: true, comments: ['最新一条'] });
+    await expect(adapter.nextVideo([], undefined, 'https://example.org/f?kw=弱智')).rejects.toThrow('吧首页');
+    expect(visits).toEqual(['/f/search/res', '/f/search/res', '/f', '/f', '/p/104', '/p/104']);
+  }, 20000);
+
   function fixture(wrongTarget = false, selfLayout?: string, pictures = false, creatorRoute = false, delayedImage = false, delayedComment = false, standaloneComment = false, replyLabel = '1', responseCode?: number) {
     const media = delayedImage
       ? '<div class="media-container"><div class="swiper-slide swiper-slide-active" data-index="0" data-swiper-slide-index="0"></div></div>' +
@@ -540,7 +587,7 @@ describe.skipIf(!findBrowserExecutable())('public post adapter on an offline Chr
       '<a class="p_author_name" href="/home/main?id=tb.owner">主人</a><div class="d_post_content">三点去的。</div></div>' +
       '<div class="l_post" data-field=' + "'" + '{"content":{"post_id":"12","post_no":2}}' + "'" + '>' +
       '<a class="p_author_name" href="/home/main?id=tb.reader">读者</a><div class="d_post_content">看到小雨了？</div>' +
-      '<button onclick="this.nextElementSibling.hidden=false">回复</button><div hidden>' +
+      '<button onclick="setTimeout(() => { this.nextElementSibling.hidden=false }, 450)">回复</button><div hidden>' +
       '<textarea></textarea><button id="send">发送</button></div></div>' +
       '<script>document.querySelector("#send").onclick=()=>fetch("/f/commit/post/add",{method:"POST",body:new URLSearchParams({tid:"111",quote_id:"12",content:document.querySelector("textarea").value})});</script>';
     vi.spyOn(backend, 'withPublicPage').mockImplementation(async <T>(
